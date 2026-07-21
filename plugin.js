@@ -3,7 +3,6 @@ import { isAbsolute, resolve as resolvePath } from "node:path";
 import { tool } from "@opencode-ai/plugin";
 const defaultModel = "deepseek/deepseek-v4-pro";
 const advisorAgent = "opencode-advisor:advisor";
-const btwAgent = "opencode-advisor:btw";
 const advisorDefaultPrompt = `You are a strategic advisor for a coding agent. Read the conversation transcript and provide a concise plan or course correction.
 
 Your advice must be actionable — tell the executor:
@@ -21,11 +20,6 @@ Key heuristics:
 You may use read-only tools (read, glob, grep, webfetch, websearch, skill) to inspect the workspace or public web for better context. You may NOT edit files or run arbitrary commands beyond read-only shell commands.
 
 Respond in under 300 words. Use enumerated steps. Do NOT write code or edit files — only advise.`;
-const btwDefaultPrompt = `You are a helpful assistant answering a by-the-way question. You have access to the conversation transcript and the workspace.
-
-Use the conversation context to understand what the user is working on, then answer their question concisely. You may use read-only tools (read, glob, grep, webfetch, websearch, skill) to inspect the workspace or public web.
-
-Respond in under 300 words. Do NOT ask follow-up questions — this is a one-shot interaction. Do NOT edit any files.`;
 const advisorToolDescription = `Consult a strategic advisor (backed by a stronger reviewer model, configurable; defaults to DeepSeek V4 Pro) that reads your full conversation context and provides a concise plan or course correction.
 
 Call advisor BEFORE substantive work — before writing code, editing files, committing to an interpretation, or building on an assumption. If the task requires orientation first (finding files, reading code, fetching docs), do that, then call advisor. Orientation is NOT substantive work.
@@ -76,7 +70,6 @@ const profileKeys = new Set([
     "top_p",
     "options",
 ]);
-const splitKeys = new Set(["advisor", "btw"]);
 function assertString(v, label, allowEmpty = false) {
     if ("string" === typeof v) {
         if (!allowEmpty && (0 === v.length)) {
@@ -220,46 +213,6 @@ function parseProfile(value, section) {
     }
     return returnValue;
 }
-function parseOptions(raw) {
-    let returnValue;
-    if (undefined === raw) {
-        returnValue = { advisor: {}, btw: {} };
-    }
-    else if (null === raw) {
-        throw new Error("Plugin options must be a non-array object or absent; got null. " +
-            "Use either shared profile keys or { advisor: ..., btw: ... }.");
-    }
-    else if (isPlainObject(raw)) {
-        const obj = raw;
-        const keys = Object.keys(obj);
-        const hasSplit = keys.some((k) => splitKeys.has(k));
-        const hasProfile = keys.some((k) => profileKeys.has(k));
-        if (hasSplit && hasProfile) {
-            throw new Error("Cannot mix profile keys (model, variant, prompt, temperature, top_p, options) " +
-                "with section keys (advisor, btw). Use one shape exclusively.");
-        }
-        if (hasSplit) {
-            for (let iL1 = 0; iL1 < keys.length; iL1++) {
-                if (!splitKeys.has(keys[iL1])) {
-                    throw new Error(`Unknown top-level key "${keys[iL1]}". Use only "advisor" and/or "btw".`);
-                }
-            }
-            returnValue = {
-                advisor: parseProfile(obj.advisor, "advisor"),
-                btw: parseProfile(obj.btw, "btw"),
-            };
-        }
-        else {
-            const shared = parseProfile(obj, "root plugin options");
-            returnValue = { advisor: shared, btw: shared };
-        }
-    }
-    else {
-        throw new Error("Plugin options must be a non-array object or absent. " +
-            "Use either shared profile keys or { advisor: ..., btw: ... }.");
-    }
-    return returnValue;
-}
 function resolveModel(profileModel, pluginCfg) {
     let returnValue;
     if (undefined !== profileModel) {
@@ -302,7 +255,6 @@ function buildAgentConfig(profile, defaultPrompt, pluginCfg) {
     return agentCfg;
 }
 let inAdvisorCall = false;
-let inBtwCall = false;
 function formatTranscript(messages, excludeID) {
     return messages
         .filter((m) => m.info.id !== excludeID)
@@ -323,43 +275,15 @@ function formatTranscript(messages, excludeID) {
 function textPart(t) {
     return { type: "text", text: t };
 }
-function setOutputText(output, text) {
-    let found = false;
-    for (let iL1 = 0; (iL1 < output.parts.length) && !found; iL1++) {
-        const part = output.parts[iL1];
-        if ("text" === part.type) {
-            part.text = text;
-            found = true;
-        }
-    }
-}
 export const AdvisorPlugin = async ({ client, directory }, rawOptions) => {
-    const profiles = parseOptions(rawOptions);
-    await resolveFileRef(profiles.advisor, directory);
-    if (profiles.advisor !== profiles.btw) {
-        await resolveFileRef(profiles.btw, directory);
-    }
-    let ownsBtwCommand = false;
-    let defaultBtwCommand;
+    const advisorProfile = parseProfile(rawOptions, "plugin options");
+    await resolveFileRef(advisorProfile, directory);
     return {
         config: async (cfg) => {
-            ownsBtwCommand = false;
-            const advisorCfg = buildAgentConfig(profiles.advisor, advisorDefaultPrompt, cfg);
-            const btwCfg = buildAgentConfig(profiles.btw, btwDefaultPrompt, cfg);
+            const advisorCfg = buildAgentConfig(advisorProfile, advisorDefaultPrompt, cfg);
             const agents = cfg.agent ?? {};
             agents[advisorAgent] = advisorCfg;
-            agents[btwAgent] = btwCfg;
             cfg.agent = agents;
-            const commands = cfg.command ?? {};
-            if ("btw" in commands) {
-                ownsBtwCommand = (undefined !== defaultBtwCommand) && (commands.btw === defaultBtwCommand);
-            }
-            else {
-                defaultBtwCommand ??= { template: "$ARGUMENTS" };
-                Object.assign(commands, { btw: defaultBtwCommand });
-                cfg.command = commands;
-                ownsBtwCommand = true;
-            }
         },
         tool: {
             advisor: tool({
@@ -424,93 +348,7 @@ export const AdvisorPlugin = async ({ client, directory }, rawOptions) => {
                 },
             }),
         },
-        "command.execute.before": async (input, output) => {
-            if ("btw" === input.command && ownsBtwCommand) {
-                if (inBtwCall) {
-                    setOutputText(output, "Error: /btw is already running in background. Wait for the current one to complete.");
-                }
-                else {
-                    const sessionID = input.sessionID;
-                    const btwQuery = input.arguments;
-                    if (!btwQuery || !btwQuery.trim()) {
-                        setOutputText(output, "Usage: /btw <question> — answers a one-shot question in background.");
-                    }
-                    else {
-                        setOutputText(output, `[BTW] ${btwQuery}...`);
-                        inBtwCall = true;
-                        processBtw(client, sessionID, btwQuery);
-                    }
-                }
-            }
-        },
     };
 };
 export default AdvisorPlugin;
-async function processBtw(client, mainSessionID, query) {
-    try {
-        const { data: rawMessages } = await client.session.messages({
-            path: { id: mainSessionID },
-        });
-        const transcript = formatTranscript(rawMessages ?? []);
-        const promptText = transcript
-            ? `--- CONVERSATION CONTEXT ---\n\n${transcript}\n\n--- QUESTION ---\n\n${query}`
-            : query;
-        let answerText = "BTW returned no answer.";
-        const createRes = await client.session.create({
-            body: { title: "btw-subcall" },
-        });
-        const tempID = createRes.data?.id;
-        if (!tempID) {
-            throw new Error("BTW ephemeral session creation failed to return a session ID");
-        }
-        try {
-            const response = await client.session.prompt({
-                path: { id: tempID },
-                body: {
-                    agent: btwAgent,
-                    parts: [textPart(promptText)],
-                },
-            });
-            const joinedText = response?.data?.parts
-                ?.filter((p) => "text" === p.type)
-                .map((p) => p.text)
-                .join("\n");
-            if (joinedText && 0 < joinedText.length) {
-                answerText = joinedText;
-            }
-        }
-        finally {
-            await client.session
-                .delete({ path: { id: tempID } })
-                .catch((e) => console.error("btw: failed to delete ephemeral session", e));
-        }
-        await client.session
-            .prompt({
-            path: { id: mainSessionID },
-            body: {
-                noReply: true,
-                parts: [
-                    textPart(`---\n**BTW:** ${query}\n\n${answerText}\n---`),
-                ],
-            },
-        })
-            .catch((e) => console.error("btw: failed to append result card", e));
-    }
-    catch (err) {
-        const msg = `BTW error: ${String(err)}`;
-        console.error("btw:", msg);
-        await client.session
-            .prompt({
-            path: { id: mainSessionID },
-            body: {
-                noReply: true,
-                parts: [textPart(`---\n**BTW:** ${query}\n\n⚠️ ${msg}\n---`)],
-            },
-        })
-            .catch(() => { });
-    }
-    finally {
-        inBtwCall = false;
-    }
-}
 //# sourceMappingURL=plugin.js.map

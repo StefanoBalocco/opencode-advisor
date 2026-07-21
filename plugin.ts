@@ -2,13 +2,12 @@ import { readFile } from "node:fs/promises";
 import { isAbsolute, resolve as resolvePath } from "node:path";
 import type { Config as PluginConfig, Plugin } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
-import type { OpencodeClient, Part, TextPart, TextPartInput } from "@opencode-ai/sdk";
+import type { TextPart, TextPartInput } from "@opencode-ai/sdk";
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
 const defaultModel: string = "deepseek/deepseek-v4-pro";
 const advisorAgent: string = "opencode-advisor:advisor";
-const btwAgent: string = "opencode-advisor:btw";
 
 // ── Default prompts ────────────────────────────────────────────────────────
 
@@ -29,12 +28,6 @@ Key heuristics:
 You may use read-only tools (read, glob, grep, webfetch, websearch, skill) to inspect the workspace or public web for better context. You may NOT edit files or run arbitrary commands beyond read-only shell commands.
 
 Respond in under 300 words. Use enumerated steps. Do NOT write code or edit files — only advise.`;
-
-const btwDefaultPrompt: string = `You are a helpful assistant answering a by-the-way question. You have access to the conversation transcript and the workspace.
-
-Use the conversation context to understand what the user is working on, then answer their question concisely. You may use read-only tools (read, glob, grep, webfetch, websearch, skill) to inspect the workspace or public web.
-
-Respond in under 300 words. Do NOT ask follow-up questions — this is a one-shot interaction. Do NOT edit any files.`;
 
 const advisorToolDescription: string = `Consult a strategic advisor (backed by a stronger reviewer model, configurable; defaults to DeepSeek V4 Pro) that reads your full conversation context and provides a concise plan or course correction.
 
@@ -108,8 +101,6 @@ const profileKeys: Set<string> = new Set( [
 	"top_p",
 	"options",
 ] );
-
-const splitKeys: Set<string> = new Set( [ "advisor", "btw" ] );
 
 // ── Validation helpers ─────────────────────────────────────────────────────
 
@@ -281,57 +272,6 @@ function parseProfile( value: unknown, section: string ): Profile {
 	return returnValue;
 }
 
-// ── Root options parser ────────────────────────────────────────────────────
-
-function parseOptions( raw: unknown ): { advisor: Profile; btw: Profile } {
-	let returnValue: { advisor: Profile; btw: Profile };
-
-	if( undefined === raw ) {
-		returnValue = { advisor: {}, btw: {} };
-	} else if( null === raw ) {
-		throw new Error(
-			"Plugin options must be a non-array object or absent; got null. " +
-			"Use either shared profile keys or { advisor: ..., btw: ... }.",
-		);
-	} else if( isPlainObject( raw ) ) {
-		const obj: Record<string, unknown> = raw;
-		const keys: string[] = Object.keys( obj );
-
-		const hasSplit: boolean = keys.some( ( k: string ): boolean => splitKeys.has( k ) );
-		const hasProfile: boolean = keys.some( ( k: string ): boolean => profileKeys.has( k ) );
-
-		if( hasSplit && hasProfile ) {
-			throw new Error(
-				"Cannot mix profile keys (model, variant, prompt, temperature, top_p, options) " +
-				"with section keys (advisor, btw). Use one shape exclusively.",
-			);
-		}
-
-		if( hasSplit ) {
-			// Validate no unknown keys at top level
-			for( let iL1: number = 0; iL1 < keys.length; iL1++ ) {
-				if( !splitKeys.has( keys[ iL1 ] ) ) {
-					throw new Error( `Unknown top-level key "${keys[ iL1 ]}". Use only "advisor" and/or "btw".` );
-				}
-			}
-			returnValue = {
-				advisor: parseProfile( obj.advisor, "advisor" ),
-				btw: parseProfile( obj.btw, "btw" ),
-			};
-		} else {
-			const shared: Profile = parseProfile( obj, "root plugin options" );
-			returnValue = { advisor: shared, btw: shared };
-		}
-	} else {
-		throw new Error(
-			"Plugin options must be a non-array object or absent. " +
-			"Use either shared profile keys or { advisor: ..., btw: ... }.",
-		);
-	}
-
-	return returnValue;
-}
-
 // ── Model resolution ───────────────────────────────────────────────────────
 
 function resolveModel(
@@ -396,7 +336,6 @@ function buildAgentConfig(
 // ── Recursion guards ───────────────────────────────────────────────────────
 
 let inAdvisorCall: boolean = false;
-let inBtwCall: boolean = false;
 
 // ── Transcript helpers ─────────────────────────────────────────────────────
 
@@ -426,67 +365,22 @@ function textPart( t: string ): TextPartInput {
 	return { type: "text", text: t };
 }
 
-// Mutate first text Part's text in command.execute.before output,
-// preserving its identity fields (id/sessionID/messageID).
-function setOutputText( output: { parts: Part[] }, text: string ): void {
-	let found: boolean = false;
-	for( let iL1: number = 0; ( iL1 < output.parts.length ) && !found; iL1++ ) {
-		const part: Part = output.parts[ iL1 ];
-		if( "text" === part.type ) {
-			part.text = text;
-			found = true;
-		}
-	}
-}
-
 // ── Plugin factory ─────────────────────────────────────────────────────────
 
 export const AdvisorPlugin: Plugin = async ( { client, directory }, rawOptions ) => {
-	const profiles: { advisor: Profile; btw: Profile } = parseOptions( rawOptions );
+	const advisorProfile: Profile = parseProfile( rawOptions, "plugin options" );
 
 	// Resolve {file:...} prompt references
-	await resolveFileRef( profiles.advisor, directory );
-
-	if( profiles.advisor !== profiles.btw ) {
-		await resolveFileRef( profiles.btw, directory );
-	}
-
-	// Tracks whether this plugin registered the default /btw command during config.
-	// When false (user already defined command.btw), the plugin must neither
-	// overwrite the user's definition nor intercept execution.
-	let ownsBtwCommand: boolean = false;
-
-	// Stash of the default command object installed by this plugin instance.
-	// Reference identity on re-config runs distinguishes plugin-owned from user-owned.
-	let defaultBtwCommand: Undefinedable<Record<string, unknown>>;
+	await resolveFileRef( advisorProfile, directory );
 
 	return {
 		config: async ( cfg: PluginConfig ): Promise<void> => {
-			// Reset for safety on repeated config-hook invocations
-			ownsBtwCommand = false;
-
-			const advisorCfg: Record<string, unknown> = buildAgentConfig( profiles.advisor, advisorDefaultPrompt, cfg );
-			const btwCfg: Record<string, unknown> = buildAgentConfig( profiles.btw, btwDefaultPrompt, cfg );
+			const advisorCfg: Record<string, unknown> = buildAgentConfig( advisorProfile, advisorDefaultPrompt, cfg );
 
 			// cfg.agent uses an index signature allowing arbitrary agent names
 			const agents: NonNullable<PluginConfig[ "agent" ]> = cfg.agent ?? {};
 			agents[ advisorAgent ] = advisorCfg as ( typeof agents )[ string ];
-			agents[ btwAgent ] = btwCfg as ( typeof agents )[ string ];
 			cfg.agent = agents;
-
-			// Register /btw command only if the user has not already defined one.
-			// On re-config we use reference identity to recognise the object we
-			// installed; a distinct object means the user (or another plugin) has
-			// taken over the command and we must not intercept.
-			const commands: NonNullable<PluginConfig[ "command" ]> = cfg.command ?? {};
-			if( "btw" in commands ) {
-				ownsBtwCommand = ( undefined !== defaultBtwCommand ) && ( commands.btw === defaultBtwCommand );
-			} else {
-				defaultBtwCommand ??= { template: "$ARGUMENTS" };
-				Object.assign( commands, { btw: defaultBtwCommand } );
-				cfg.command = commands;
-				ownsBtwCommand = true;
-			}
 		},
 
 		tool: {
@@ -555,110 +449,7 @@ export const AdvisorPlugin: Plugin = async ( { client, directory }, rawOptions )
 				},
 			} ),
 		},
-
-		"command.execute.before": async ( input: { command: string; sessionID: string; arguments?: string }, output: { parts: Part[] } ): Promise<void> => {
-			if( "btw" === input.command && ownsBtwCommand ) {
-				if( inBtwCall ) {
-					setOutputText( output, "Error: /btw is already running in background. Wait for the current one to complete." );
-				} else {
-					const sessionID: string = input.sessionID;
-					const btwQuery: Undefinedable<string> = input.arguments;
-
-					if( !btwQuery || !btwQuery.trim() ) {
-						setOutputText( output, "Usage: /btw <question> — answers a one-shot question in background." );
-					} else {
-						// Acknowledge immediately
-						setOutputText( output, `[BTW] ${btwQuery}...` );
-
-						inBtwCall = true;
-
-						// Background execution
-						processBtw( client, sessionID, btwQuery );
-					}
-				}
-			}
-		},
 	};
 };
 
 export default AdvisorPlugin;
-
-// ── BTW background handler ─────────────────────────────────────────────────
-
-async function processBtw(
-	client: OpencodeClient,
-	mainSessionID: string,
-	query: string,
-): Promise<void> {
-	try {
-		const { data: rawMessages } = await client.session.messages( {
-			path: { id: mainSessionID },
-		} );
-
-		const transcript: string = formatTranscript( rawMessages ?? [] );
-
-		const promptText: string = transcript
-			? `--- CONVERSATION CONTEXT ---\n\n${transcript}\n\n--- QUESTION ---\n\n${query}`
-			: query;
-
-		let answerText: string = "BTW returned no answer.";
-		const createRes: { data?: { id?: string } } = await client.session.create( {
-			body: { title: "btw-subcall" },
-		} );
-		const tempID: Undefinedable<string> = createRes.data?.id;
-
-		if( !tempID ) {
-			throw new Error( "BTW ephemeral session creation failed to return a session ID" );
-		}
-
-		try {
-			const response: { data?: { parts?: Array<{ type: string; text?: string }> } } = await client.session.prompt( {
-				path: { id: tempID },
-				body: {
-					agent: btwAgent,
-					parts: [ textPart( promptText ) ],
-				},
-			} );
-
-			const joinedText: Undefinedable<string> = response?.data?.parts
-				?.filter( ( p: { type: string; text?: string } ): p is TextPart => "text" === p.type )
-				.map( ( p: TextPart ): string => p.text )
-				.join( "\n" );
-			if( joinedText && 0 < joinedText.length ) {
-				answerText = joinedText;
-			}
-		} finally {
-			await client.session
-				.delete( { path: { id: tempID } } )
-				.catch( ( e: unknown ): void => console.error( "btw: failed to delete ephemeral session", e ) );
-		}
-
-		// Append result card to main session
-		await client.session
-			.prompt( {
-				path: { id: mainSessionID },
-				body: {
-					noReply: true,
-					parts: [
-						textPart( `---\n**BTW:** ${query}\n\n${answerText}\n---` ),
-					],
-				},
-			} )
-			.catch( ( e: unknown ): void => console.error( "btw: failed to append result card", e ) );
-	} catch( err: unknown ) {
-		const msg: string = `BTW error: ${String( err )}`;
-		console.error( "btw:", msg );
-		// Try to surface a failure card
-		await client.session
-			.prompt( {
-				path: { id: mainSessionID },
-				body: {
-					noReply: true,
-					parts: [ textPart( `---\n**BTW:** ${query}\n\n⚠️ ${msg}\n---` ) ],
-				},
-			} )
-			.catch( () => { /* ignore append failure during error */ } );
-	} finally {
-		inBtwCall = false;
-	}
-}

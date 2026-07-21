@@ -47,7 +47,25 @@ function createPluginInput(session, directory) {
 function createMockConfig() {
     return { agent: {}, command: {} };
 }
-test.serial("parseOptions: undefined returns defaults", async (t) => {
+test.serial("config registers only advisor agent, no btw agent or command", async (t) => {
+    const cfg = createMockConfig();
+    const plugin = await AdvisorPlugin(createPluginInput(createMockSession()), undefined);
+    await plugin.config(cfg);
+    t.truthy(cfg.agent["opencode-advisor:advisor"]);
+    t.falsy(cfg.agent["opencode-advisor:btw"]);
+    t.falsy(cfg.command.btw);
+    t.falsy(plugin["command.execute.before"]);
+});
+test.serial("config: does not mutate user-defined command object", async (t) => {
+    const userCommands = { btw: { template: "$ARGUMENTS" }, other: { template: "do-something" } };
+    const cfg = { agent: {}, command: userCommands };
+    const snapshot = structuredClone(userCommands);
+    const plugin = await AdvisorPlugin(createPluginInput(createMockSession()), undefined);
+    await plugin.config(cfg);
+    t.is(cfg.command, userCommands, "command object must not be replaced");
+    t.deepEqual(cfg.command, snapshot, "command object must not be mutated");
+});
+test.serial("profile: undefined returns defaults", async (t) => {
     const cfg = createMockConfig();
     const plugin = await AdvisorPlugin(createPluginInput(createMockSession()), undefined);
     await plugin.config(cfg);
@@ -55,7 +73,7 @@ test.serial("parseOptions: undefined returns defaults", async (t) => {
     t.truthy(advisorAgent);
     t.is(advisorAgent.model, "deepseek/deepseek-v4-pro");
 });
-test.serial("parseOptions: empty object returns defaults", async (t) => {
+test.serial("profile: empty object returns defaults", async (t) => {
     const cfg = createMockConfig();
     const plugin = await AdvisorPlugin(createPluginInput(createMockSession()), {});
     await plugin.config(cfg);
@@ -63,61 +81,19 @@ test.serial("parseOptions: empty object returns defaults", async (t) => {
     t.truthy(advisorAgent);
     t.is(advisorAgent.model, "deepseek/deepseek-v4-pro");
 });
-test.serial("parseOptions: null throws", async (t) => {
+test.serial("profile: null throws", async (t) => {
     await t.throwsAsync(async () => {
         await AdvisorPlugin(createPluginInput(createMockSession()), null);
     }, { message: /null/ });
 });
-test.serial("parseOptions: shared profile applies to both agents", async (t) => {
+test.serial("profile: direct options apply to advisor", async (t) => {
     const cfg = createMockConfig();
     const plugin = await AdvisorPlugin(createPluginInput(createMockSession()), { model: "anthropic/claude-opus-4-7", temperature: 0 });
     await plugin.config(cfg);
     const advisorCfg = cfg.agent["opencode-advisor:advisor"];
-    const btwCfg = cfg.agent["opencode-advisor:btw"];
     t.truthy(advisorCfg);
-    t.truthy(btwCfg);
     t.is(advisorCfg.model, "anthropic/claude-opus-4-7");
-    t.is(btwCfg.model, "anthropic/claude-opus-4-7");
-});
-test.serial("parseOptions: split profiles work", async (t) => {
-    const cfg = createMockConfig();
-    const plugin = await AdvisorPlugin(createPluginInput(createMockSession()), {
-        advisor: { options: { reasoningEffort: "high" } },
-        btw: { prompt: "Answer concisely." },
-    });
-    await plugin.config(cfg);
-    const agent = cfg.agent["opencode-advisor:advisor"];
-    t.truthy(agent);
-    t.truthy(agent.options);
-    t.is(agent.options.reasoningEffort, "high");
-    t.is(cfg.agent["opencode-advisor:btw"].prompt, "Answer concisely.");
-});
-test.serial("parseOptions: split section can be omitted", async (t) => {
-    const cfg = createMockConfig();
-    const plugin = await AdvisorPlugin(createPluginInput(createMockSession()), { advisor: { options: { reasoningEffort: "high" } } });
-    await plugin.config(cfg);
-    t.truthy(cfg.agent["opencode-advisor:advisor"].options);
-    t.is(cfg.agent["opencode-advisor:btw"].model, "deepseek/deepseek-v4-pro");
-});
-test.serial("parseOptions: null split section throws", async (t) => {
-    await t.throwsAsync(async () => {
-        await AdvisorPlugin(createPluginInput(createMockSession()), { advisor: null });
-    }, { message: /null/ });
-});
-test.serial("parseOptions: mixed shared and split throws", async (t) => {
-    await t.throwsAsync(async () => {
-        await AdvisorPlugin(createPluginInput(createMockSession()), { model: "anthropic/claude-opus-4-7", advisor: {} });
-    }, { message: /Cannot mix/ });
-});
-test.serial("parseOptions: unknown top-level key in split form throws", async (t) => {
-    await t.throwsAsync(async () => {
-        await AdvisorPlugin(createPluginInput(createMockSession()), { advisor: {}, unknownKey: {} });
-    }, { message: /unknownKey/ });
-});
-test.serial("parseOptions: unknown profile key throws", async (t) => {
-    await t.throwsAsync(async () => {
-        await AdvisorPlugin(createPluginInput(createMockSession()), { advisor: { color: "red" } });
-    }, { message: /color/ });
+    t.is(advisorCfg.temperature, 0);
 });
 test.serial("fixed permissions: no ls/cat/grep shell entries", async (t) => {
     const cfg = createMockConfig();
@@ -136,68 +112,31 @@ test.serial("fixed permissions: no ls/cat/grep shell entries", async (t) => {
     t.is(bash["cat *"], undefined);
     t.is(bash["grep *"], undefined);
 });
-test.serial("fixed permissions: structure is identical between agents", async (t) => {
-    const cfg = createMockConfig();
-    const plugin = await AdvisorPlugin(createPluginInput(createMockSession()), undefined);
-    await plugin.config(cfg);
-    const advisorAgent = cfg.agent["opencode-advisor:advisor"];
-    const btwAgent = cfg.agent["opencode-advisor:btw"];
-    t.truthy(advisorAgent);
-    t.truthy(btwAgent);
-    t.deepEqual(advisorAgent.permission, btwAgent.permission);
-});
 test.serial("prompt: custom prompt replaces default", async (t) => {
     const cfg = createMockConfig();
-    const plugin = await AdvisorPlugin(createPluginInput(createMockSession()), { prompt: "Custom shared prompt" });
+    const plugin = await AdvisorPlugin(createPluginInput(createMockSession()), { prompt: "Custom advisor prompt" });
     await plugin.config(cfg);
-    t.is(cfg.agent["opencode-advisor:advisor"].prompt, "Custom shared prompt");
-    t.is(cfg.agent["opencode-advisor:btw"].prompt, "Custom shared prompt");
+    t.is(cfg.agent["opencode-advisor:advisor"].prompt, "Custom advisor prompt");
 });
-test.serial("prompt: custom prompt per-feature", async (t) => {
-    const cfg = createMockConfig();
-    const plugin = await AdvisorPlugin(createPluginInput(createMockSession()), {
-        advisor: { prompt: "Advisor prompt" },
-        btw: { prompt: "BTW prompt" },
-    });
-    await plugin.config(cfg);
-    t.is(cfg.agent["opencode-advisor:advisor"].prompt, "Advisor prompt");
-    t.is(cfg.agent["opencode-advisor:btw"].prompt, "BTW prompt");
-});
-test.serial("prompt: empty string in shared profile replaces default", async (t) => {
+test.serial("prompt: empty string in options replaces default", async (t) => {
     const cfg = createMockConfig();
     const plugin = await AdvisorPlugin(createPluginInput(createMockSession()), { prompt: "" });
     await plugin.config(cfg);
     t.is(cfg.agent["opencode-advisor:advisor"].prompt, "");
-    t.is(cfg.agent["opencode-advisor:btw"].prompt, "");
 });
-test.serial("prompt: empty string in split profile replaces default per-feature", async (t) => {
-    const cfg = createMockConfig();
-    const plugin = await AdvisorPlugin(createPluginInput(createMockSession()), {
-        advisor: { prompt: "" },
-        btw: { prompt: "" },
-    });
-    await plugin.config(cfg);
-    t.is(cfg.agent["opencode-advisor:advisor"].prompt, "");
-    t.is(cfg.agent["opencode-advisor:btw"].prompt, "");
-});
-test.serial("prompt: shared {file:} relative path reads file content", async (t) => {
+test.serial("prompt: {file:} relative path reads file content", async (t) => {
     const cfg = createMockConfig();
     const expectedContent = await readFile(changelogAbs, "utf-8");
     const plugin = await AdvisorPlugin(createPluginInput(createMockSession()), { prompt: "{file:CHANGELOG.md}" });
     await plugin.config(cfg);
     t.is(cfg.agent["opencode-advisor:advisor"].prompt, expectedContent);
-    t.is(cfg.agent["opencode-advisor:btw"].prompt, expectedContent);
 });
-test.serial("prompt: split {file:} relative and absolute paths work independently", async (t) => {
+test.serial("prompt: {file:} absolute path reads file content", async (t) => {
     const cfg = createMockConfig();
     const expectedContent = await readFile(changelogAbs, "utf-8");
-    const plugin = await AdvisorPlugin(createPluginInput(createMockSession()), {
-        advisor: { prompt: "{file:CHANGELOG.md}" },
-        btw: { prompt: `{file:${changelogAbs}}` },
-    });
+    const plugin = await AdvisorPlugin(createPluginInput(createMockSession()), { prompt: `{file:${changelogAbs}}` });
     await plugin.config(cfg);
     t.is(cfg.agent["opencode-advisor:advisor"].prompt, expectedContent);
-    t.is(cfg.agent["opencode-advisor:btw"].prompt, expectedContent);
 });
 test.serial("prompt: {file:} empty path rejected during init", async (t) => {
     const err = await t.throwsAsync(async () => {
@@ -234,126 +173,6 @@ test.serial("prompt: non-exact {file:x} forms remain literal and do not fail", a
     const plugin4 = await AdvisorPlugin(createPluginInput(createMockSession()), { prompt: "prefix{file:CHANGELOG.md}suffix" });
     await plugin4.config(cfg);
     t.is(cfg.agent["opencode-advisor:advisor"].prompt, "prefix{file:CHANGELOG.md}suffix");
-});
-test.serial("config hook: registers /btw command when absent", async (t) => {
-    const cfg = createMockConfig();
-    const plugin = await AdvisorPlugin(createPluginInput(createMockSession()), undefined);
-    await plugin.config(cfg);
-    t.truthy(cfg.command.btw);
-    t.deepEqual(cfg.command.btw, { template: "$ARGUMENTS" });
-});
-test.serial("config hook: does not overwrite existing /btw command", async (t) => {
-    const userCommand = { template: "$ARGUMENTS", description: "My custom btw" };
-    const cfg = { agent: {}, command: { btw: userCommand } };
-    const plugin = await AdvisorPlugin(createPluginInput(createMockSession()), undefined);
-    await plugin.config(cfg);
-    t.is(cfg.command.btw, userCommand);
-});
-test.serial("ownership: intercepts /btw when plugin owns default command", async (t) => {
-    const session = createMockSession();
-    const cfg = createMockConfig();
-    const plugin = await AdvisorPlugin(createPluginInput(session), undefined);
-    await plugin.config(cfg);
-    t.truthy(cfg.command.btw);
-    const existingPart = { id: "pid-own", sessionID: "sess-own", messageID: "msg-own", type: "text", text: "" };
-    const output = { parts: [existingPart] };
-    const hook = plugin["command.execute.before"];
-    await hook({ command: "btw", sessionID: "sess-own", arguments: "hello?" }, output);
-    t.is(existingPart.text, "[BTW] hello?...");
-});
-test.serial("ownership: survives second config invocation on same config object", async (t) => {
-    const session = createMockSession();
-    const cfg = createMockConfig();
-    const plugin = await AdvisorPlugin(createPluginInput(session), undefined);
-    await plugin.config(cfg);
-    t.truthy(cfg.command.btw);
-    await plugin.config(cfg);
-    const existingPart = { id: "pid-reconfig", sessionID: "sess-reconfig", messageID: "msg-reconfig", type: "text", text: "" };
-    const output = { parts: [existingPart] };
-    const hook = plugin["command.execute.before"];
-    await hook({ command: "btw", sessionID: "sess-reconfig", arguments: "still works?" }, output);
-    t.is(existingPart.text, "[BTW] still works?...", "hook must still intercept after second config call");
-});
-test.serial("ownership: does NOT intercept /btw when user owns command", async (t) => {
-    let createCalled = false;
-    const session = createMockSession({
-        create: (async () => {
-            createCalled = true;
-            return { data: { id: "should-not-be-called" } };
-        }),
-    });
-    const userCommand = { template: "$ARGUMENTS", description: "My custom btw" };
-    const cfg = { agent: {}, command: { btw: userCommand } };
-    const plugin = await AdvisorPlugin(createPluginInput(session), undefined);
-    await plugin.config(cfg);
-    t.is(cfg.command.btw, userCommand);
-    const originalText = "original output unchanged";
-    const existingPart = { id: "pid-user", sessionID: "sess-user", messageID: "msg-user", type: "text", text: originalText };
-    const output = { parts: [existingPart] };
-    const hook = plugin["command.execute.before"];
-    await hook({ command: "btw", sessionID: "sess-user", arguments: "anything" }, output);
-    t.is(existingPart.text, originalText, "hook must NOT mutate output when user owns /btw");
-    t.falsy(createCalled, "session.create must NOT be called when user owns /btw");
-});
-test.serial("BTW: missing session ID appends failure card", async (t) => {
-    const captured = { text: undefined };
-    const session = createMockSession({
-        create: (async () => ({ data: {} })),
-        prompt: (async (args) => {
-            if (args?.body?.noReply) {
-                captured.text = args.body.parts?.[0]?.text;
-            }
-            return { data: { parts: [{ type: "text", text: "" }] } };
-        }),
-    });
-    const cfg = createMockConfig();
-    const plugin = await AdvisorPlugin(createPluginInput(session), undefined);
-    await plugin.config(cfg);
-    const input = { command: "btw", sessionID: "sess-1", arguments: "test query" };
-    const output = { parts: [] };
-    const hook = plugin["command.execute.before"];
-    await hook(input, output);
-    await new Promise((resolve) => setTimeout(resolve, 150));
-    t.truthy(captured.text, "Expected a failure card to be appended");
-    t.truthy(captured.text.includes("⚠️"), `Card should contain warning emoji, got: ${captured.text}`);
-    t.truthy(captured.text.toLowerCase().includes("error") || captured.text.includes("BTW"), `Card should indicate error, got: ${captured.text}`);
-});
-test.serial("session cleanup: ephemeral session is deleted after use", async (t) => {
-    const captured = { called: false, id: undefined };
-    const session = createMockSession({
-        delete: (async (args) => {
-            captured.called = true;
-            captured.id = args?.path?.id;
-        }),
-    });
-    const cfg = createMockConfig();
-    const plugin = await AdvisorPlugin(createPluginInput(session), undefined);
-    await plugin.config(cfg);
-    const input = { command: "btw", sessionID: "sess-1", arguments: "test cleanup" };
-    const output = { parts: [] };
-    const hook = plugin["command.execute.before"];
-    await hook(input, output);
-    await new Promise((resolve) => setTimeout(resolve, 150));
-    t.truthy(captured.called, "Expected session.delete to be called");
-    t.is(captured.id, "temp-session-1");
-});
-test.serial("session cleanup: delete failure does not throw", async (t) => {
-    const captured = { callCount: 0 };
-    const session = createMockSession({
-        delete: (async () => {
-            captured.callCount++;
-            throw new Error("Simulated delete failure");
-        }),
-    });
-    const cfg = createMockConfig();
-    const plugin = await AdvisorPlugin(createPluginInput(session), undefined);
-    await plugin.config(cfg);
-    const input = { command: "btw", sessionID: "sess-1", arguments: "test delete failure" };
-    const output = { parts: [] };
-    const hook = plugin["command.execute.before"];
-    await hook(input, output);
-    await new Promise((resolve) => setTimeout(resolve, 150));
-    t.is(captured.callCount, 1);
 });
 test.serial("advisor: success lifecycle — fetch transcript, create session, prompt with agent only, return text, delete", async (t) => {
     const captured = {
@@ -523,9 +342,9 @@ test.serial("profile: non-object options", async (t) => {
     await t.throwsAsync(async () => { await AdvisorPlugin(createPluginInput(createMockSession()), { options: "string" }); }, { message: /must be a non-array object/ });
     await t.throwsAsync(async () => { await AdvisorPlugin(createPluginInput(createMockSession()), { options: 42 }); }, { message: /must be a non-array object/ });
 });
-test.serial("profile: unknown nested key in split form", async (t) => {
+test.serial("profile: unknown nested key in options throws", async (t) => {
     await t.throwsAsync(async () => {
-        await AdvisorPlugin(createPluginInput(createMockSession()), { advisor: { options: { reasoningEffort: "high" }, color: "red" } });
+        await AdvisorPlugin(createPluginInput(createMockSession()), { options: { reasoningEffort: "high" }, color: "red" });
     }, { message: /color/ });
 });
 test.serial("options: accept nested object/array with primitive JSON values", async (t) => {
@@ -584,20 +403,16 @@ test.serial("options: reject array at root", async (t) => {
         await AdvisorPlugin(createPluginInput(createMockSession()), { options: [1, 2, 3] });
     }, { message: /must be a non-array object/ });
 });
-test.serial("hidden agents: both agents have hidden=true, mode=subagent", async (t) => {
+test.serial("hidden agent: has hidden=true, mode=subagent", async (t) => {
     const cfg = createMockConfig();
     const plugin = await AdvisorPlugin(createPluginInput(createMockSession()), {});
     await plugin.config(cfg);
     const advisorAgent = cfg.agent["opencode-advisor:advisor"];
-    const btwAgent = cfg.agent["opencode-advisor:btw"];
     t.truthy(advisorAgent);
-    t.truthy(btwAgent);
     t.is(advisorAgent.hidden, true, "advisor agent must be hidden");
-    t.is(btwAgent.hidden, true, "btw agent must be hidden");
     t.is(advisorAgent.mode, "subagent");
-    t.is(btwAgent.mode, "subagent");
 });
-test.serial("hidden agents: default prompt is built-in, custom prompt replaces", async (t) => {
+test.serial("hidden agent: default prompt is built-in, custom prompt replaces", async (t) => {
     const cfg = createMockConfig();
     const plugin = await AdvisorPlugin(createPluginInput(createMockSession()), undefined);
     await plugin.config(cfg);
@@ -605,15 +420,13 @@ test.serial("hidden agents: default prompt is built-in, custom prompt replaces",
     t.truthy(advisorAgent.prompt);
     t.truthy(50 < advisorAgent.prompt.length);
 });
-test.serial("hidden agents: profile params map to agent config", async (t) => {
+test.serial("hidden agent: profile params map to agent config", async (t) => {
     const cfg = createMockConfig();
     const plugin = await AdvisorPlugin(createPluginInput(createMockSession()), {
-        advisor: {
-            temperature: 0.7,
-            top_p: 0.9,
-            variant: "test-variant",
-            options: { customOpt: true },
-        },
+        temperature: 0.7,
+        top_p: 0.9,
+        variant: "test-variant",
+        options: { customOpt: true },
     });
     await plugin.config(cfg);
     const agent = cfg.agent["opencode-advisor:advisor"];
@@ -622,7 +435,7 @@ test.serial("hidden agents: profile params map to agent config", async (t) => {
     t.is(agent.variant, "test-variant");
     t.deepEqual(agent.options, { customOpt: true });
 });
-test.serial("hidden agents: complete fixed permission policy exercised", async (t) => {
+test.serial("hidden agent: complete fixed permission policy exercised", async (t) => {
     const cfg = createMockConfig();
     const plugin = await AdvisorPlugin(createPluginInput(createMockSession()), undefined);
     await plugin.config(cfg);
@@ -657,204 +470,6 @@ test.serial("hidden agents: complete fixed permission policy exercised", async (
     t.is(permission["task"], undefined);
     t.is(permission["todo"], undefined);
     t.is(permission["run"], undefined);
-});
-test.serial("BTW success: full lifecycle — transcript, prompt with agent only, text extract, session delete, result card", async (t) => {
-    const captured = {
-        messagesCalled: false,
-        createTitle: undefined,
-        promptAgent: undefined,
-        promptModel: "sentinel",
-        promptSystem: "sentinel",
-        promptTools: "sentinel",
-        promptText: undefined,
-        deleteSessionID: undefined,
-        noReplyParts: undefined,
-    };
-    const session = createMockSession({
-        messages: (async () => {
-            captured.messagesCalled = true;
-            return {
-                data: [
-                    { info: { role: "user", id: "msg-1" }, parts: [{ type: "text", text: "Hello" }] },
-                ],
-            };
-        }),
-        create: (async (args) => {
-            captured.createTitle = args?.body?.title;
-            return { data: { id: "btw-ephemeral" } };
-        }),
-        prompt: (async (args) => {
-            if (args?.body?.noReply) {
-                captured.noReplyParts = args.body.parts?.[0]?.text;
-                return { data: { parts: [] } };
-            }
-            captured.promptAgent = args?.body?.agent;
-            captured.promptModel = args?.body?.model;
-            captured.promptSystem = args?.body?.system;
-            captured.promptTools = args?.body?.tools;
-            captured.promptText = args?.body?.parts?.[0]?.text;
-            return { data: { parts: [{ type: "text", text: "BTW answer here" }] } };
-        }),
-        delete: (async (args) => {
-            captured.deleteSessionID = args?.path?.id;
-        }),
-    });
-    const cfg = createMockConfig();
-    const plugin = await AdvisorPlugin(createPluginInput(session), undefined);
-    await plugin.config(cfg);
-    const output = { parts: [] };
-    const hook = plugin["command.execute.before"];
-    await hook({ command: "btw", sessionID: "main-sess", arguments: "What's up?" }, output);
-    await new Promise((resolve) => setTimeout(resolve, 150));
-    t.truthy(captured.messagesCalled, "transcript was fetched");
-    t.truthy(captured.promptText, "prompt text was built from transcript");
-    t.truthy(captured.promptText.includes("Hello"), "transcript content included");
-    t.truthy(captured.promptText.includes("What's up?"), "query included in prompt");
-    t.is(captured.createTitle, "btw-subcall");
-    t.is(captured.promptAgent, "opencode-advisor:btw");
-    t.is(captured.promptModel, undefined, "no model in prompt body");
-    t.is(captured.promptSystem, undefined, "no system in prompt body");
-    t.is(captured.promptTools, undefined, "no tools in prompt body");
-    t.truthy(captured.noReplyParts, "result card was appended");
-    t.truthy(captured.noReplyParts.includes("BTW answer here"), "answer text in card");
-    t.falsy(captured.noReplyParts.includes("Error"), "no error text in success card");
-    t.falsy(captured.noReplyParts.includes("⚠️"), "no warning in success card");
-    t.is(captured.deleteSessionID, "btw-ephemeral", "ephemeral session deleted");
-});
-test.serial("BTW: undefined messages data tolerates missing transcript and returns normal answer", async (t) => {
-    const captured = {
-        messagesCalled: false,
-        promptText: undefined,
-        noReplyParts: undefined,
-        promptAgent: undefined,
-        deleteSessionID: undefined,
-    };
-    const session = createMockSession({
-        messages: (async () => {
-            captured.messagesCalled = true;
-            return { data: undefined };
-        }),
-        create: (async () => ({ data: { id: "btw-ephemeral-undef" } })),
-        prompt: (async (args) => {
-            if (args?.body?.noReply) {
-                captured.noReplyParts = args.body.parts?.[0]?.text;
-                return { data: { parts: [] } };
-            }
-            captured.promptAgent = args?.body?.agent;
-            captured.promptText = args?.body?.parts?.[0]?.text;
-            return { data: { parts: [{ type: "text", text: "BTW answer without context" }] } };
-        }),
-        delete: (async (args) => {
-            captured.deleteSessionID = args?.path?.id;
-        }),
-    });
-    const cfg = createMockConfig();
-    const plugin = await AdvisorPlugin(createPluginInput(session), undefined);
-    await plugin.config(cfg);
-    const output = { parts: [] };
-    const hook = plugin["command.execute.before"];
-    await hook({ command: "btw", sessionID: "main-sess-undef", arguments: "question?" }, output);
-    await new Promise((resolve) => setTimeout(resolve, 150));
-    t.truthy(captured.messagesCalled, "messages() was called");
-    t.truthy(captured.promptText, "prompt text was built");
-    t.is(captured.promptText, "question?", "prompt text equals the bare query when transcript is empty");
-    t.is(captured.promptAgent, "opencode-advisor:btw");
-    t.truthy(captured.noReplyParts, "result card was appended");
-    t.truthy(captured.noReplyParts.includes("question?"), "query in card");
-    t.truthy(captured.noReplyParts.includes("BTW answer without context"), "answer text in card");
-    t.falsy(captured.noReplyParts.includes("⚠️"), "no warning in success card");
-    t.is(captured.deleteSessionID, "btw-ephemeral-undef", "ephemeral session deleted");
-});
-test.serial("command.execute.before: mutates existing text part, preserves identity", async (t) => {
-    const session = createMockSession();
-    const cfg = createMockConfig();
-    const plugin = await AdvisorPlugin(createPluginInput(session), undefined);
-    await plugin.config(cfg);
-    const existingPart = {
-        id: "part-id-1",
-        sessionID: "sess-1",
-        messageID: "msg-1",
-        type: "text",
-        text: "",
-    };
-    const output = { parts: [existingPart] };
-    const hook = plugin["command.execute.before"];
-    await hook({ command: "btw", sessionID: "sess-1", arguments: "test identity" }, output);
-    t.is(output.parts.length, 1);
-    t.is(output.parts[0], existingPart);
-    t.is(existingPart.text, "[BTW] test identity...");
-    t.is(existingPart.id, "part-id-1");
-    t.is(existingPart.sessionID, "sess-1");
-    t.is(existingPart.messageID, "msg-1");
-});
-test.serial("command.execute.before: empty query preserves identity", async (t) => {
-    const session = createMockSession();
-    const cfg = createMockConfig();
-    const plugin = await AdvisorPlugin(createPluginInput(session), undefined);
-    await plugin.config(cfg);
-    const existingPart = {
-        id: "part-id-empty",
-        sessionID: "sess-empty",
-        messageID: "msg-empty",
-        type: "text",
-        text: "",
-    };
-    const output = { parts: [existingPart] };
-    const hook = plugin["command.execute.before"];
-    await hook({ command: "btw", sessionID: "sess-empty", arguments: "" }, output);
-    t.is(output.parts.length, 1);
-    const part = output.parts[0];
-    t.is(part.text, "Usage: /btw <question> — answers a one-shot question in background.");
-    t.is(part.id, "part-id-empty");
-    t.is(part.sessionID, "sess-empty");
-    t.is(part.messageID, "msg-empty");
-});
-test.serial("command.execute.before: recursive error preserves identity", async (t) => {
-    const session = createMockSession({
-        messages: (async () => {
-            await new Promise((resolve) => setTimeout(resolve, 500));
-            return { data: [] };
-        }),
-    });
-    const cfg = createMockConfig();
-    const plugin = await AdvisorPlugin(createPluginInput(session), undefined);
-    await plugin.config(cfg);
-    const hook = plugin["command.execute.before"];
-    const output1 = {
-        parts: [{ id: "part-rec-1", sessionID: "sess-rec", messageID: "msg-rec", type: "text", text: "" }],
-    };
-    await hook({ command: "btw", sessionID: "sess-rec", arguments: "first" }, output1);
-    const output2 = {
-        parts: [{ id: "part-rec-2", sessionID: "sess-rec", messageID: "msg-rec", type: "text", text: "" }],
-    };
-    await hook({ command: "btw", sessionID: "sess-rec", arguments: "second" }, output2);
-    t.is(output2.parts.length, 1);
-    const part = output2.parts[0];
-    t.truthy(part.text.includes("already running"));
-    t.is(part.id, "part-rec-2");
-    t.is(part.sessionID, "sess-rec");
-    t.is(part.messageID, "msg-rec");
-});
-test.serial("command.execute.before: non-text part preserved unchanged", async (t) => {
-    const session = createMockSession();
-    const cfg = createMockConfig();
-    const plugin = await AdvisorPlugin(createPluginInput(session), undefined);
-    await plugin.config(cfg);
-    const nonTextPart = {
-        id: "part-start-1",
-        sessionID: "sess-start",
-        messageID: "msg-start",
-        type: "step-start",
-    };
-    const output = { parts: [nonTextPart] };
-    const hook = plugin["command.execute.before"];
-    await hook({ command: "btw", sessionID: "sess-start", arguments: "something" }, output);
-    t.is(output.parts.length, 1);
-    t.is(output.parts[0], nonTextPart);
-    t.is(output.parts[0].type, "step-start");
-    t.is(output.parts[0].id, "part-start-1");
-    t.is(output.parts[0].sessionID, "sess-start");
-    t.is(output.parts[0].messageID, "msg-start");
 });
 test.serial("advisor: recursion guard blocks concurrent calls", async (t) => {
     let resolveMessages = () => { };
@@ -1007,22 +622,17 @@ test.serial("profile: non-number top_p type throws", async (t) => {
         await AdvisorPlugin(createPluginInput(createMockSession()), { top_p: "0.9" });
     }, { message: /top_p.*must be a finite number/ });
 });
-test.serial("profile: bare string advisor section throws", async (t) => {
+test.serial("profile: unknown top-level key throws", async (t) => {
     await t.throwsAsync(async () => {
-        await AdvisorPlugin(createPluginInput(createMockSession()), { advisor: "bare-string" });
-    }, { message: /advisor.*must be a non-array object/ });
+        await AdvisorPlugin(createPluginInput(createMockSession()), { advisor: {} });
+    }, { message: /unknown key.*advisor/ });
 });
-test.serial("profile: numeric advisor section throws", async (t) => {
-    await t.throwsAsync(async () => {
-        await AdvisorPlugin(createPluginInput(createMockSession()), { advisor: 42 });
-    }, { message: /advisor.*must be a non-array object/ });
-});
-test.serial("parseOptions: array root throws", async (t) => {
+test.serial("profile: array root throws", async (t) => {
     await t.throwsAsync(async () => {
         await AdvisorPlugin(createPluginInput(createMockSession()), [1, 2]);
     }, { message: /must be a non-array object/ });
 });
-test.serial("parseOptions: string root throws", async (t) => {
+test.serial("profile: string root throws", async (t) => {
     await t.throwsAsync(async () => {
         await AdvisorPlugin(createPluginInput(createMockSession()), "bare-string");
     }, { message: /must be a non-array object/ });
@@ -1032,7 +642,8 @@ test.serial("config: cfg without agent/command properties uses defaults", async 
     const plugin = await AdvisorPlugin(createPluginInput(createMockSession()), undefined);
     await plugin.config(cfg);
     t.truthy(cfg.agent["opencode-advisor:advisor"]);
-    t.truthy(cfg.command.btw);
+    t.falsy(cfg.agent["opencode-advisor:btw"]);
+    t.falsy(cfg.command);
 });
 test.serial("advisor: undefined data from messages returns declined", async (t) => {
     const session = createMockSession({

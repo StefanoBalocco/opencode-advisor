@@ -1,7 +1,7 @@
 # OpenCode Advisor Plugin
 
-First-class `advisor()` tool and `/btw` command for OpenCode, powered by
-hidden internal agents with fixed read-only permissions.
+First-class `advisor()` tool for OpenCode, powered by a hidden internal agent
+with fixed read-only permissions.
 
 ## Install
 
@@ -13,53 +13,17 @@ Add the package to your `opencode.json` plugin array:
 }
 ```
 
-No further configuration is required. If you do not already have a
-`command.btw`, the root plugin registers a default `/btw` slash command. If you
-already have `command.btw` defined in your configuration, the plugin leaves it
-entirely untouched: it neither overwrites the definition nor intercepts
-execution.
+No further configuration is required.
 
 ### Configuring the model
 
 Defaults to `deepseek/deepseek-v4-pro`. Override via plugin tuple options:
-
-**Shared profile** (applies same config to both Advisor and BTW):
 
 ```json
 {
   "plugin": [
     ["@stefanobalocco/opencode-advisor", { "model": "anthropic/claude-opus-4-7", "temperature": 0 }]
   ]
-}
-```
-
-**Split profiles** (per-feature overrides):
-
-```json
-{
-  "plugin": [
-    ["@stefanobalocco/opencode-advisor", {
-      "advisor": { "options": { "reasoningEffort": "high" } },
-      "btw": { "prompt": "Answer concisely and in Italian." }
-    }]
-  ]
-}
-```
-
-A split section can be omitted; the omitted feature uses its defaults.
-Shared and split forms cannot be mixed.
-
-### Overriding the default `/btw` command
-
-The plugin registers `/btw` with `{ "template": "$ARGUMENTS" }` when no user
-definition exists. To override (for example, to add a custom description or
-change the template), define `command.btw` in your `opencode.json`:
-
-```json
-{
-  "command": {
-    "btw": { "template": "$ARGUMENTS", "description": "Ask a background question" }
-  }
 }
 ```
 
@@ -101,7 +65,7 @@ plugin tuple.
 
 ## Fixed tool and permission policy
 
-Both Advisor and BTW receive the same non-configurable permission allowlist:
+The hidden agent receives this non-configurable permission allowlist:
 
 | Tool / Action   | Policy |
 |-----------------|--------|
@@ -147,23 +111,10 @@ overridden.
 The hidden agent uses only read-only tools to inspect the workspace and
 public web. It cannot edit files or run arbitrary shell commands.
 
-## How /btw works
-
-1. User types `/btw <question>`.
-2. The plugin acknowledges immediately with `[BTW] question...`.
-3. A background ephemeral session is created and prompted by the
-   `opencode-advisor:btw` hidden agent with the transcript and question.
-4. The response is appended to the main session as a non-reply card,
-   without interrupting the running agent.
-5. Errors produce a visible failure card.
-
 ## Requirements
 
 - OpenCode >= 1.4.9 (plugin API)
 - Provider authentication via `/connect` in OpenCode
-
-OpenCode loads the compiled plugin. There is no separate `./btw` export; the
-root plugin provides both features.
 
 ## Development
 
