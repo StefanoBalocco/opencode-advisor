@@ -1,24 +1,43 @@
 {
-  "name": "@u007/opencode-advisor",
-  "version": "1.2.1",
-  "description": "OpenCode plugins — advisor() tool and /btw command",
+  "name": "@stefanobalocco/opencode-advisor",
+  "version": "2.0.0",
+  "description": "OpenCode plugin — advisor() tool and /btw command via hidden internal agents",
   "type": "module",
-  "main": "src/advisor.ts",
+  "main": "plugin.js",
   "exports": {
-    ".": "./src/advisor.ts",
-    "./btw": "./src/btw.ts"
+    ".": "./plugin.js"
   },
   "scripts": {
-    "setup": "bun run scripts/install.ts"
+    "build": "node build.mjs all",
+    "build:plugin": "node build.mjs plugin",
+    "build:tests": "node build.mjs tests",
+    "tests": "c8 --include=plugin.ts --exclude-after-remap --per-file --100 --reporter=text --reporter=lcov ava '*.test.js' --verbose"
   },
-  "keywords": ["opencode", "plugin", "advisor", "btw", "deepseek"],
-  "license": "MIT",
+  "files": [
+    "plugin.js"
+  ],
+  "keywords": [
+    "opencode",
+    "plugin",
+    "advisor",
+    "btw"
+  ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/u007/opencode-advisor.git"
+    "url": "git+https://github.com/StefanoBalocco/opencode-advisor.git"
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
   },
   "dependencies": {
-    "@opencode-ai/plugin": ">=1.4.9",
-    "@opencode-ai/sdk": ">=1.4.9"
+    "@opencode-ai/plugin": ">=1.4.9"
+  },
+  "devDependencies": {
+    "typescript": "~6",
+    "ava": "~6",
+    "c8": "~12",
+    "@opencode-ai/sdk": ">=1.4.9",
+    "@types/node": "^24.13.3"
   }
 }

@@ -1,146 +1,168 @@
 # OpenCode Advisor Plugin
 
-First-class `advisor()` tool for OpenCode. The executor model (any provider) can consult DeepSeek V4 Pro for strategic guidance mid-task — before writing code, when stuck, or before declaring done.
-
-## How it works
-
-The `advisor` tool appears in the executor's tool list alongside `bash`, `read`, `edit`, etc. The executor decides **autonomously** when to call it based on the tool description's timing guidance — exactly like Claude Code's native advisor tool.
-
-```
-Executor: "I need to plan this implementation → calls advisor()"
-         ↓
-Plugin intercepts, fetches session transcript via SDK
-         ↓
-Creates ephemeral session, prompts deepseek-v4-pro with transcript
-         ↓
-Returns <300 word guidance → injected as tool result
-         ↓
-Executor continues with advice integrated
-```
+First-class `advisor()` tool and `/btw` command for OpenCode, powered by
+hidden internal agents with fixed read-only permissions.
 
 ## Install
 
-```bash
-```bash
-npm install -g @u007/opencode-advisor
-```
-
-Then add to `opencode.json`:
+Add the package to your `opencode.json` plugin array:
 
 ```json
 {
-  "plugin": ["@u007/opencode-advisor"]
+  "plugin": ["@stefanobalocco/opencode-advisor"]
 }
 ```
 
-Or use the setup script for interactive toggle:
+No further configuration is required. If you do not already have a
+`command.btw`, the root plugin registers a default `/btw` slash command. If you
+already have `command.btw` defined in your configuration, the plugin leaves it
+entirely untouched: it neither overwrites the definition nor intercepts
+execution.
 
-```bash
-bun run setup         # interactive — shows status, prompts actions
-bun run setup btw     # install/upgrade a specific plugin
-bun run setup --all   # install/upgrade everything
-```
+### Configuring the model
 
-Or drop plugin `.ts` files into `~/.config/opencode/plugins/` for zero-config setup.
+Defaults to `deepseek/deepseek-v4-pro`. Override via plugin tuple options:
 
-## Configuring the advisor model
-
-Defaults to `deepseek/deepseek-v4-pro`. Override via either:
-
-**1. `opencode.json`** — pass options in the plugin entry:
+**Shared profile** (applies same config to both Advisor and BTW):
 
 ```json
 {
   "plugin": [
-    ["@u007/opencode-advisor", { "model": "anthropic/claude-opus-4-7" }]
+    ["@stefanobalocco/opencode-advisor", { "model": "anthropic/claude-opus-4-7", "temperature": 0 }]
   ]
 }
 ```
 
-Or split form: `["@u007/opencode-advisor", { "providerID": "anthropic", "modelID": "claude-opus-4-7" }]`.
-
-**2. Environment variables** (override config):
-
-```bash
-export OPENCODE_ADVISOR_MODEL="anthropic/claude-opus-4-7"
-# or split:
-export OPENCODE_ADVISOR_PROVIDER="anthropic"
-export OPENCODE_ADVISOR_MODEL="claude-opus-4-7"
-```
-
-The chosen provider must be authenticated in OpenCode (`/connect`).
-
-## How the executor knows when to call it
-
-The tool description tells the model:
-
-- Call **before substantive work** — after reading/discovery, before writing code
-- Call **when stuck** — errors recurring, approach not converging
-- Call **before declaring done** — after deliverable is durable
-- On long tasks: at least once before approach + once before done
-- Give advice serious weight; surface conflicts rather than silently switching
-
-## BTW Command
-
-A `/btw` (by-the-way) slash command that spawns a fully ephemeral sub-session to answer your question independently. The BTW answer appears as a card in the main session without interrupting the currently running agent.
-
-```
-User: /btw what is the capital of France?
-   ↓
-Acknowledged immediately — agent continues working
-   ↓
-Ephemeral session investigates in background, reads files, answers
-   ↓
-Answer card appears in session — main conversation uninterrupted
-```
-
-### How it works
-
-1. User types `/btw <question>`
-2. Plugin intercepts via `command.execute.before` hook, acknowledges immediately
-3. Background process creates an ephemeral session via SDK (no parentID — fully independent)
-4. Feeds it the main session transcript + the question
-5. Ephemeral session runs, reads files, investigates
-6. Captures the single response
-7. Deletes the ephemeral session
-8. Appends answer as a card to main session via `session.prompt({ noReply: true })` — no AI response triggered
-9. `/btw` message stays visible; current agent unaffected
-
-### Install
-
-```bash
-bun run setup btw      # install/upgrade via setup script
-bun run setup         # interactive mode, select BTW
-```
-
-Or drop `src/btw.ts` into `~/.config/opencode/plugins/` and `commands/btw.md` into `~/.config/opencode/commands/`.
-
-Or via npm (add as separate plugin):
-
-```json
-{
-  "plugin": ["@u007/opencode-advisor", "@u007/opencode-advisor/btw"]
-}
-```
-
-### Config
-
-Pass options in the plugin entry:
+**Split profiles** (per-feature overrides):
 
 ```json
 {
   "plugin": [
-    ["@u007/opencode-advisor/btw", { "model": "deepseek/deepseek-v4-pro" }]
+    ["@stefanobalocco/opencode-advisor", {
+      "advisor": { "options": { "reasoningEffort": "high" } },
+      "btw": { "prompt": "Answer concisely and in Italian." }
+    }]
   ]
 }
 ```
 
-Or env vars: `OPENCODE_BTW_MODEL`, `OPENCODE_BTW_PROVIDER`.
+A split section can be omitted; the omitted feature uses its defaults.
+Shared and split forms cannot be mixed.
+
+### Overriding the default `/btw` command
+
+The plugin registers `/btw` with `{ "template": "$ARGUMENTS" }` when no user
+definition exists. To override (for example, to add a custom description or
+change the template), define `command.btw` in your `opencode.json`:
+
+```json
+{
+  "command": {
+    "btw": { "template": "$ARGUMENTS", "description": "Ask a background question" }
+  }
+}
+```
+
+## Profile fields
+
+| Field       | Type              | Default                                                              |
+|-------------|-------------------|----------------------------------------------------------------------|
+| `model`     | `"provider/model"` | `agent.plan.model`, then global `model`, else `deepseek/deepseek-v4-pro` |
+| `variant`   | string            | absent                                                               |
+| `prompt`    | string            | built-in default (replaces, does NOT append)                         |
+| `temperature` | finite number   | 0                                                                    |
+| `top_p`     | finite number     | absent                                                               |
+| `options`   | JSON-safe object  | absent                                                               |
+
+Providing `prompt` replaces the default system prompt entirely. It does not
+append.
+
+The `model` value must be in `provider/model` format with a non-empty
+provider and model segment.
+
+The `options` object supports arbitrary JSON-safe values (null, boolean,
+finite number, string, arrays, nested plain objects). It passes
+provider-specific properties like `reasoningEffort`.
+
+No environment variables are read. Configuration is entirely through the
+plugin tuple.
+
+## Fixed tool and permission policy
+
+Both Advisor and BTW receive the same non-configurable permission allowlist:
+
+| Tool / Action   | Policy |
+|-----------------|--------|
+| `read`          | allow  |
+| `glob`          | allow  |
+| `grep`          | allow  |
+| `webfetch`      | allow  |
+| `websearch`     | allow  |
+| `skill`         | allow  |
+| `edit`          | deny   |
+| All other tools | deny   |
+
+**Bash commands** — only these are allowed:
+
+| Command pattern          | Policy |
+|--------------------------|--------|
+| `wc *`                   | allow  |
+| `git log *`              | allow  |
+| `git diff *`             | allow  |
+| `git show *`             | allow  |
+| `rtk wc *`               | allow  |
+| `rtk git log *`          | allow  |
+| `rtk git diff *`         | allow  |
+| `rtk git show *`         | allow  |
+| All other bash commands  | deny   |
+
+No write access, no LSP, no task/todo, no MCP tools. This policy cannot be
+overridden.
+
+## How advisor works
+
+1. The `advisor()` tool appears in the executor's tool list.
+2. The executor calls it (no arguments needed).
+3. The plugin fetches the session transcript via the v1 REST client,
+   excluding the calling message.
+4. An ephemeral session is created and prompted by the
+   `opencode-advisor:advisor` hidden agent.
+5. The hidden agent supplies its own model, system prompt, temperature, and
+   fixed permissions.
+6. The response text is returned as the tool result.
+7. The ephemeral session is deleted.
+
+The hidden agent uses only read-only tools to inspect the workspace and
+public web. It cannot edit files or run arbitrary shell commands.
+
+## How /btw works
+
+1. User types `/btw <question>`.
+2. The plugin acknowledges immediately with `[BTW] question...`.
+3. A background ephemeral session is created and prompted by the
+   `opencode-advisor:btw` hidden agent with the transcript and question.
+4. The response is appended to the main session as a non-reply card,
+   without interrupting the running agent.
+5. Errors produce a visible failure card.
 
 ## Requirements
 
-- OpenCode >= 1.4.x
-- DeepSeek API key configured via `/connect` in OpenCode
+- OpenCode >= 1.4.9 (plugin API)
+- Provider authentication via `/connect` in OpenCode
+
+OpenCode loads the compiled plugin. There is no separate `./btw` export; the
+root plugin provides both features.
+
+## Development
+
+```bash
+pnpm install
+pnpm run build         # compiles plugin.ts and plugin.test.ts
+pnpm run tests         # runs AVA with c8 coverage (100% threshold)
+```
+
+Development uses the configured build scripts. Source is `plugin.ts`, compiled
+to `plugin.js`. The published package entry is `plugin.js`.
 
 ## License
 

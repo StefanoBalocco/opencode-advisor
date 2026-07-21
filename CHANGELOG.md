@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.0.0 — 2026-07-21
+
+- Unified Advisor + BTW into a single root plugin configured via tuple `["@stefanobalocco/opencode-advisor", profile]` with shared or split AgentConfig-like per-feature profiles.
+- Replaced per-feature env-var and Bun-based BTW setup with hidden internal agents (`opencode-advisor:advisor`, `opencode-advisor:btw`) registered in the `config` hook.
+- Both hidden agents enforce a fixed read/research-only permission allowlist with no write access.
+- Published plugin compiles to `plugin.js`; build and test via AVA + c8.
+
 ## 1.2.1 — 2026-05-10
 
 - Refactored model config from `config` hook to plugin entry tuple `options` parameter for both advisor and BTW plugins.
