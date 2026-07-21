@@ -1,5 +1,3 @@
-import { readFile } from "node:fs/promises";
-import { isAbsolute, resolve as resolvePath } from "node:path";
 import { tool } from "@opencode-ai/plugin";
 const defaultModel = "deepseek/deepseek-v4-pro";
 const advisorAgent = "opencode-advisor:advisor";
@@ -20,7 +18,7 @@ Key heuristics:
 You may use read-only tools (read, glob, grep, webfetch, websearch, skill) to inspect the workspace or public web for better context. You may NOT edit files or run arbitrary commands beyond read-only shell commands.
 
 Respond in under 300 words. Use enumerated steps. Do NOT write code or edit files — only advise.`;
-const advisorToolDescription = `Consult a strategic advisor (backed by a stronger reviewer model, configurable; defaults to DeepSeek V4 Pro) that reads your full conversation context and provides a concise plan or course correction.
+const advisorToolDescription = `Consult a strategic advisor backed by a configurable reviewer model. It reads your full conversation context and provides a concise plan or course correction.
 
 Call advisor BEFORE substantive work — before writing code, editing files, committing to an interpretation, or building on an assumption. If the task requires orientation first (finding files, reading code, fetching docs), do that, then call advisor. Orientation is NOT substantive work.
 
@@ -132,32 +130,6 @@ function assertValidOptions(v, path) {
         throw new Error(`${path}: must be a non-array object, got ${null === v ? "null" : typeof v}`);
     }
 }
-function matchFileRef(prompt) {
-    let returnValue;
-    if ("{file:" === prompt.slice(0, 6) && "}" === prompt.slice(-1)) {
-        const inner = prompt.slice(6, -1);
-        if (0 < inner.length) {
-            returnValue = inner;
-        }
-    }
-    return returnValue;
-}
-async function resolveFileRef(profile, directory) {
-    if (undefined !== profile.prompt) {
-        const filePath = matchFileRef(profile.prompt);
-        if (undefined !== filePath) {
-            const resolvedAbs = isAbsolute(filePath)
-                ? filePath
-                : resolvePath(directory, filePath);
-            try {
-                profile.prompt = await readFile(resolvedAbs, "utf-8");
-            }
-            catch (err) {
-                throw new Error(`Failed to read ${profile.prompt}: resolved to "${resolvedAbs}" – ${String(err)}`);
-            }
-        }
-    }
-}
 function parseProfile(value, section) {
     let returnValue;
     if (isPlainObject(value)) {
@@ -183,9 +155,6 @@ function parseProfile(value, section) {
         }
         if (undefined !== obj.prompt) {
             assertString(obj.prompt, `${section}.prompt`, true);
-            if (undefined === matchFileRef(obj.prompt) && "{file:" === (obj.prompt).slice(0, 6) && "}" === obj.prompt.slice(-1)) {
-                throw new Error(`${section}.prompt: {file:} must have a non-empty path`);
-            }
             profile.prompt = obj.prompt;
         }
         if (undefined !== obj.temperature) {
@@ -275,9 +244,8 @@ function formatTranscript(messages, excludeID) {
 function textPart(t) {
     return { type: "text", text: t };
 }
-export const AdvisorPlugin = async ({ client, directory }, rawOptions) => {
+export const AdvisorPlugin = async ({ client }, rawOptions) => {
     const advisorProfile = parseProfile(rawOptions, "plugin options");
-    await resolveFileRef(advisorProfile, directory);
     return {
         config: async (cfg) => {
             const advisorCfg = buildAgentConfig(advisorProfile, advisorDefaultPrompt, cfg);

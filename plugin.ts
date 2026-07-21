@@ -1,5 +1,3 @@
-import { readFile } from "node:fs/promises";
-import { isAbsolute, resolve as resolvePath } from "node:path";
 import type { Config as PluginConfig, Plugin } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
 import type { TextPart, TextPartInput } from "@opencode-ai/sdk";
@@ -29,7 +27,7 @@ You may use read-only tools (read, glob, grep, webfetch, websearch, skill) to in
 
 Respond in under 300 words. Use enumerated steps. Do NOT write code or edit files — only advise.`;
 
-const advisorToolDescription: string = `Consult a strategic advisor (backed by a stronger reviewer model, configurable; defaults to DeepSeek V4 Pro) that reads your full conversation context and provides a concise plan or course correction.
+const advisorToolDescription: string = `Consult a strategic advisor backed by a configurable reviewer model. It reads your full conversation context and provides a concise plan or course correction.
 
 Call advisor BEFORE substantive work — before writing code, editing files, committing to an interpretation, or building on an assumption. If the task requires orientation first (finding files, reading code, fetching docs), do that, then call advisor. Orientation is NOT substantive work.
 
@@ -165,44 +163,6 @@ function assertValidOptions( v: unknown, path: string ): asserts v is Record<str
 	}
 }
 
-// ── File reference helpers ────────────────────────────────────────────────
-
-function matchFileRef( prompt: string ): Undefinedable<string> {
-	let returnValue: Undefinedable<string>;
-
-	if( "{file:" === prompt.slice( 0, 6 ) && "}" === prompt.slice( -1 ) ) {
-		const inner: string = prompt.slice( 6, -1 );
-
-		if( 0 < inner.length ) {
-			returnValue = inner;
-		}
-		// {file:} (empty inner) returns undefined; parseProfile rejects it,
-		// but the guard here avoids treating empty-string inner as a valid path.
-	}
-
-	return returnValue;
-}
-
-async function resolveFileRef( profile: Profile, directory: string ): Promise<void> {
-	if( undefined !== profile.prompt ) {
-		const filePath: Undefinedable<string> = matchFileRef( profile.prompt );
-
-		if( undefined !== filePath ) {
-			const resolvedAbs: string = isAbsolute( filePath )
-				? filePath
-				: resolvePath( directory, filePath );
-
-			try {
-				profile.prompt = await readFile( resolvedAbs, "utf-8" );
-			} catch( err: unknown ) {
-				throw new Error(
-					`Failed to read ${profile.prompt}: resolved to "${resolvedAbs}" – ${String( err )}`,
-				);
-			}
-		}
-	}
-}
-
 // ── Profile parser ─────────────────────────────────────────────────────────
 
 function parseProfile( value: unknown, section: string ): Profile {
@@ -237,11 +197,6 @@ function parseProfile( value: unknown, section: string ): Profile {
 
 		if( undefined !== obj.prompt ) {
 			assertString( obj.prompt, `${section}.prompt`, true ); // allow empty — replaces default
-
-			if( undefined === matchFileRef( obj.prompt ) && "{file:" === ( obj.prompt ).slice( 0, 6 ) && "}" === obj.prompt.slice( -1 ) ) {
-				throw new Error( `${section}.prompt: {file:} must have a non-empty path` );
-			}
-
 			profile.prompt = obj.prompt;
 		}
 
@@ -367,11 +322,8 @@ function textPart( t: string ): TextPartInput {
 
 // ── Plugin factory ─────────────────────────────────────────────────────────
 
-export const AdvisorPlugin: Plugin = async ( { client, directory }, rawOptions ) => {
+export const AdvisorPlugin: Plugin = async ( { client }, rawOptions ) => {
 	const advisorProfile: Profile = parseProfile( rawOptions, "plugin options" );
-
-	// Resolve {file:...} prompt references
-	await resolveFileRef( advisorProfile, directory );
 
 	return {
 		config: async ( cfg: PluginConfig ): Promise<void> => {

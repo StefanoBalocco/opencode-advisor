@@ -1,11 +1,5 @@
-import { readFile } from "node:fs/promises";
-import { resolve as resolvePath } from "node:path";
-import { fileURLToPath } from "node:url";
 import test from "ava";
 import { AdvisorPlugin } from "./plugin.js";
-const __filename = fileURLToPath(import.meta.url);
-const repoRoot = resolvePath(__filename, "..");
-const changelogAbs = resolvePath(repoRoot, "CHANGELOG.md");
 function toolContext(sessionID, messageID) {
     return {
         sessionID,
@@ -41,8 +35,8 @@ function createMockSession(overrides = {}) {
     }
     return session;
 }
-function createPluginInput(session, directory) {
-    return { client: { session }, directory: directory ?? repoRoot };
+function createPluginInput(session) {
+    return { client: { session }, directory: "" };
 }
 function createMockConfig() {
     return { agent: {}, command: {} };
@@ -123,56 +117,6 @@ test.serial("prompt: empty string in options replaces default", async (t) => {
     const plugin = await AdvisorPlugin(createPluginInput(createMockSession()), { prompt: "" });
     await plugin.config(cfg);
     t.is(cfg.agent["opencode-advisor:advisor"].prompt, "");
-});
-test.serial("prompt: {file:} relative path reads file content", async (t) => {
-    const cfg = createMockConfig();
-    const expectedContent = await readFile(changelogAbs, "utf-8");
-    const plugin = await AdvisorPlugin(createPluginInput(createMockSession()), { prompt: "{file:CHANGELOG.md}" });
-    await plugin.config(cfg);
-    t.is(cfg.agent["opencode-advisor:advisor"].prompt, expectedContent);
-});
-test.serial("prompt: {file:} absolute path reads file content", async (t) => {
-    const cfg = createMockConfig();
-    const expectedContent = await readFile(changelogAbs, "utf-8");
-    const plugin = await AdvisorPlugin(createPluginInput(createMockSession()), { prompt: `{file:${changelogAbs}}` });
-    await plugin.config(cfg);
-    t.is(cfg.agent["opencode-advisor:advisor"].prompt, expectedContent);
-});
-test.serial("prompt: {file:} empty path rejected during init", async (t) => {
-    const err = await t.throwsAsync(async () => {
-        await AdvisorPlugin(createPluginInput(createMockSession()), { prompt: "{file:}" });
-    });
-    t.truthy(err.message.includes("{file:}"), "error must name the {file:} reference");
-    t.truthy(err.message.includes("must have a non-empty path"), "error must state path is empty");
-});
-test.serial("prompt: {file:} missing path fails with reference and resolved path", async (t) => {
-    const err = await t.throwsAsync(async () => {
-        await AdvisorPlugin(createPluginInput(createMockSession()), { prompt: "{file:non-existent-file.md}" });
-    });
-    t.truthy(err.message.includes("{file:non-existent-file.md}"), "error must contain original file ref");
-    t.truthy(err.message.includes(resolvePath(repoRoot, "non-existent-file.md")), "error must contain resolved absolute path");
-});
-test.serial("prompt: {file:.} directory target fails with reference and resolved path", async (t) => {
-    const err = await t.throwsAsync(async () => {
-        await AdvisorPlugin(createPluginInput(createMockSession()), { prompt: "{file:.}" });
-    });
-    t.truthy(err.message.includes("{file:.}"), "error must contain original file ref");
-    t.truthy(err.message.includes(repoRoot), "error must contain resolved absolute path");
-});
-test.serial("prompt: non-exact {file:x} forms remain literal and do not fail", async (t) => {
-    const cfg = createMockConfig();
-    const plugin1 = await AdvisorPlugin(createPluginInput(createMockSession()), { prompt: " {file:CHANGELOG.md}" });
-    await plugin1.config(cfg);
-    t.is(cfg.agent["opencode-advisor:advisor"].prompt, " {file:CHANGELOG.md}");
-    const plugin2 = await AdvisorPlugin(createPluginInput(createMockSession()), { prompt: "{file:CHANGELOG.md} " });
-    await plugin2.config(cfg);
-    t.is(cfg.agent["opencode-advisor:advisor"].prompt, "{file:CHANGELOG.md} ");
-    const plugin3 = await AdvisorPlugin(createPluginInput(createMockSession()), { prompt: "{file:CHANGELOG.md" });
-    await plugin3.config(cfg);
-    t.is(cfg.agent["opencode-advisor:advisor"].prompt, "{file:CHANGELOG.md");
-    const plugin4 = await AdvisorPlugin(createPluginInput(createMockSession()), { prompt: "prefix{file:CHANGELOG.md}suffix" });
-    await plugin4.config(cfg);
-    t.is(cfg.agent["opencode-advisor:advisor"].prompt, "prefix{file:CHANGELOG.md}suffix");
 });
 test.serial("advisor: success lifecycle — fetch transcript, create session, prompt with agent only, return text, delete", async (t) => {
     const captured = {

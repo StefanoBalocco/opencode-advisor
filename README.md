@@ -1,11 +1,10 @@
 # OpenCode Advisor Plugin
 
-First-class `advisor()` tool for OpenCode, powered by a hidden internal agent
-with fixed read-only permissions.
+Adds an `advisor()` tool to OpenCode. The tool consults a hidden internal agent with fixed read-only permissions.
 
 ## Install
 
-Add the package to your `opencode.json` plugin array:
+Add the package to the `plugin` array in `opencode.json`:
 
 ```json
 {
@@ -13,11 +12,11 @@ Add the package to your `opencode.json` plugin array:
 }
 ```
 
-No further configuration is required.
+The plugin works without options.
 
-### Configuring the model
+## Configuration
 
-Defaults to `deepseek/deepseek-v4-pro`. Override via plugin tuple options:
+Pass an optional profile object in the plugin tuple:
 
 ```json
 {
@@ -27,105 +26,89 @@ Defaults to `deepseek/deepseek-v4-pro`. Override via plugin tuple options:
 }
 ```
 
-## Profile fields
+### Model resolution
 
-| Field       | Type              | Default                                                              |
-|-------------|-------------------|----------------------------------------------------------------------|
-| `model`     | `"provider/model"` | `agent.plan.model`, then global `model`, else `deepseek/deepseek-v4-pro` |
-| `variant`   | string            | absent                                                               |
-| `prompt`    | string            | built-in default (replaces, does NOT append)                         |
-| `temperature` | finite number   | 0                                                                    |
-| `top_p`     | finite number     | absent                                                               |
-| `options`   | JSON-safe object  | absent                                                               |
+The plugin uses the first available model, in this order:
 
-Providing `prompt` replaces the default system prompt entirely. It does not
-append.
+1. The profile's `model` field.
+2. `agent.plan.model` in the OpenCode configuration.
+3. The global OpenCode `model` field.
+4. The `deepseek/deepseek-v4-pro` fallback.
 
-**File reference syntax**: instead of a literal prompt, you may write
-`{file:path}` to load prompt content from a file. The path is relative to the
-project root (the `directory` property of the plugin input), or absolute if it
-starts with `/`. The file is read once, asynchronously during plugin
-initialization — repeated `config` hook invocations do not re-read. A syntax
-error like `{file:}` (empty path) causes a load error that names `{file:}` and
-states the path is empty — no resolved path appears in the message. A missing,
-unreadable, or directory target causes a load error that includes both the
-original reference and the resolved absolute path. Non-exact forms
-(leading/trailing space, missing closing brace, inline text) are treated as
-literal prompts and never trigger I/O.
+The `model` field must use `provider/model` format with non-empty provider and model segments.
 
-The `model` value must be in `provider/model` format with a non-empty
-provider and model segment.
+### Profile fields
 
-The `options` object supports arbitrary JSON-safe values (null, boolean,
-finite number, string, arrays, nested plain objects). It passes
-provider-specific properties like `reasoningEffort`.
+| Field | Type | When omitted |
+| --- | --- | --- |
+| `model` | `"provider/model"` | Uses the resolution order above. |
+| `variant` | string | Not set. |
+| `prompt` | string | Uses the built-in system prompt. |
+| `temperature` | finite number | `0` |
+| `top_p` | finite number | Not set. |
+| `options` | JSON-safe object | Not set. |
 
-No environment variables are read. Configuration is entirely through the
-plugin tuple.
+A supplied `prompt` replaces the built-in system prompt. The `options` object accepts JSON-safe values, including null, booleans, finite numbers, strings, arrays, and nested plain objects. Use it for provider-specific settings such as `reasoningEffort`.
 
-## Fixed tool and permission policy
+The plugin does not read environment variables. Configure it through the plugin tuple.
 
-The hidden agent receives this non-configurable permission allowlist:
+## Fixed permissions
 
-| Tool / Action   | Policy |
-|-----------------|--------|
-| `read`          | allow  |
-| `glob`          | allow  |
-| `grep`          | allow  |
-| `webfetch`      | allow  |
-| `websearch`     | allow  |
-| `skill`         | allow  |
-| `edit`          | deny   |
-| All other tools | deny   |
+The hidden agent uses this non-configurable permission policy:
 
-**Bash commands** — only these are allowed:
+| Tool or action | Policy |
+| --- | --- |
+| `read` | allow |
+| `glob` | allow |
+| `grep` | allow |
+| `webfetch` | allow |
+| `websearch` | allow |
+| `skill` | allow |
+| `edit` | deny |
+| All other tools | deny |
 
-| Command pattern          | Policy |
-|--------------------------|--------|
-| `wc *`                   | allow  |
-| `git log *`              | allow  |
-| `git diff *`             | allow  |
-| `git show *`             | allow  |
-| `rtk wc *`               | allow  |
-| `rtk git log *`          | allow  |
-| `rtk git diff *`         | allow  |
-| `rtk git show *`         | allow  |
-| All other bash commands  | deny   |
+Only these Bash commands are allowed:
 
-No write access, no LSP, no task/todo, no MCP tools. This policy cannot be
-overridden.
+| Command pattern | Policy |
+| --- | --- |
+| `wc *` | allow |
+| `git log *` | allow |
+| `git diff *` | allow |
+| `git show *` | allow |
+| `rtk wc *` | allow |
+| `rtk git log *` | allow |
+| `rtk git diff *` | allow |
+| `rtk git show *` | allow |
+| All other Bash commands | deny |
 
-## How advisor works
+This policy cannot be overridden. The hidden agent cannot write files, use LSP, invoke tasks or todos, access MCP tools, or run arbitrary shell commands.
 
-1. The `advisor()` tool appears in the executor's tool list.
-2. The executor calls it (no arguments needed).
-3. The plugin fetches the session transcript via the v1 REST client,
-   excluding the calling message.
-4. An ephemeral session is created and prompted by the
-   `opencode-advisor:advisor` hidden agent.
-5. The hidden agent supplies its own model, system prompt, temperature, and
-   fixed permissions.
-6. The response text is returned as the tool result.
-7. The ephemeral session is deleted.
+## How it works
 
-The hidden agent uses only read-only tools to inspect the workspace and
-public web. It cannot edit files or run arbitrary shell commands.
+1. The executor receives the `advisor()` tool.
+2. The executor calls it without arguments.
+3. The plugin fetches the session transcript, excluding the calling message.
+4. The plugin creates an ephemeral session and prompts the hidden `opencode-advisor:advisor` agent.
+5. The hidden agent supplies its model, system prompt, temperature, and permissions.
+6. The tool returns the response text.
+7. The plugin deletes the ephemeral session.
+
+The hidden agent can inspect the workspace and public web with read-only tools. It cannot edit files or run arbitrary shell commands.
 
 ## Requirements
 
-- OpenCode >= 1.4.9 (plugin API)
-- Provider authentication via `/connect` in OpenCode
+- OpenCode >= 1.4.9
+- Provider authentication configured through `/connect` in OpenCode
 
 ## Development
 
 ```bash
-pnpm install
-pnpm run build         # compiles plugin.ts and plugin.test.ts
-pnpm run tests         # runs AVA with c8 coverage (100% threshold)
+npm install
+npm run build
+npm run tests
 ```
 
-Development uses the configured build scripts. Source is `plugin.ts`, compiled
-to `plugin.js`. The published package entry is `plugin.js`.
+The build compiles `plugin.ts` and `plugin.test.ts` to JavaScript. The published package entry is `plugin.js`.
 
 ## License
 

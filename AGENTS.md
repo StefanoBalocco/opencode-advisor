@@ -1,60 +1,36 @@
 # AGENTS.md
 
-This file governs OpenCode agent behavior in this repository.
+This file governs OpenCode agent behavior in this repository. See [README.md](README.md) for installation and user configuration.
 
-## What this repo is
+## Repository purpose
 
-An OpenCode plugin package (`@stefanobalocco/opencode-advisor`) that provides
-a single feature from the root entry:
-
-- **Advisor** — `advisor()` tool that consults a strategic model
+`@stefanobalocco/opencode-advisor` provides one feature: the `advisor()` tool, which consults a strategic model.
 
 ## Architecture
 
-One entry point (`plugin.ts`). The plugin factory registers a single hidden
-internal agent (`opencode-advisor:advisor`) in the `config` hook, with its
-own system prompt, model, temperature, and fixed read-only permission policy.
-The feature uses the v1 plugin `client` to create an ephemeral session and
-prompt it by agent name. No direct model or system override is passed in the
-prompt body; the hidden agent supplies all parameters.
+`plugin.ts` is the only source entry point. Its factory registers the hidden `opencode-advisor:advisor` subagent in the `config` hook with its own prompt, model, temperature, and fixed read-only permission policy.
 
-### Plugin tuple options
+The `advisor()` tool uses the v1 plugin client to:
 
-Accepts an optional Advisor profile object:
+1. Fetch the current transcript.
+2. Create an ephemeral session.
+3. Prompt the hidden agent by name without passing `model`, `system`, or `tools` in the prompt body.
+4. Extract text parts from the response.
+5. Delete the ephemeral session in `finally`.
 
-```json
-["@stefanobalocco/opencode-advisor", { "model": "anthropic/claude-opus-4-7", "temperature": 0 }]
-```
+A recursion guard rejects concurrent nested calls.
 
-When omitted, defaults are used.
+## Configuration invariants
 
-#### Profile fields
+The optional profile object is validated at plugin initialization. Model resolution uses the first available value: profile `model`, `agent.plan.model`, global `model`, then the `deepseek/deepseek-v4-pro` fallback.
 
-| Field | Type | Default |
-|-------|------|---------|
-| `model` | `"provider/model"` | `agent.plan.model`, then global `model`, else `deepseek/deepseek-v4-pro` |
-| `variant` | string | absent |
-| `prompt` | string | built-in default (replaces, does NOT append) |
-| `temperature` | finite number | 0 |
-| `top_p` | finite number | absent |
-| `options` | JSON-safe object | absent |
+A supplied `prompt`, including an empty string, replaces the built-in prompt. `temperature` falls back to `0`. `top_p`, `variant`, and `options` are set only when supplied. Profile `options` accepts JSON-safe plain objects and is cloned before registration.
 
-Providing `prompt` replaces the entire default system prompt. It is not
-appended.
+The plugin does not read environment variables.
 
-**File reference**: instead of a literal prompt, use `{file:path}` to load
-content from a file. The path is relative to the project directory, or
-absolute if it starts with `/`. The file is read once during plugin
-initialization (not on config-hook re-invocation). An empty `{file:}` is
-rejected with a syntax error that names `{file:}` and states the path is empty
-— no resolved path is shown. A missing, unreadable, or directory target fails
-with both the original reference and the resolved path in the error. Non-exact
-forms (whitespace, missing `}`, inline text) are literal prompts and never
-I/O.
+## Fixed permissions
 
-### Fixed permission allowlist
-
-Non-configurable. The hidden agent receives:
+The hidden agent always receives this policy:
 
 ```json
 {
@@ -80,28 +56,14 @@ Non-configurable. The hidden agent receives:
 }
 ```
 
-No write access, no LSP, no task/todo, no MCP tools, and only the Bash
-commands listed above.
+No write access, LSP, task or todo tools, MCP tools, or arbitrary Bash commands are available.
 
-### Session lifecycle
-
-The advisor:
-
-1. Fetches transcript via `client.session.messages()` (v1 REST client)
-2. Creates an ephemeral session via `client.session.create()`
-3. Prompts via `client.session.prompt()` with `body.agent` set to the
-   hidden agent; no `body.model`, `body.system`, or `body.tools`
-4. Extracts text parts from the response
-5. Deletes the ephemeral session in `finally`
-6. A recursion guard prevents concurrent nested calls
-
-### Development
+## Development
 
 ```bash
-pnpm install
-pnpm run build
-pnpm run tests
+npm install
+npm run build
+npm run tests
 ```
 
-Development uses the configured build scripts. Source is `plugin.ts`, compiled
-to `plugin.js`. The published package entry is `plugin.js`.
+The build compiles `plugin.ts` and `plugin.test.ts` to JavaScript. The published package entry is `plugin.js`.
