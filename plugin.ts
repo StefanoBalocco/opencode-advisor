@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+import { isAbsolute, resolve as resolvePath } from "node:path";
 import type { Config as PluginConfig, Plugin } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
 import type { OpencodeClient, Part, TextPart, TextPartInput } from "@opencode-ai/sdk";
@@ -172,6 +174,44 @@ function assertValidOptions( v: unknown, path: string ): asserts v is Record<str
 	}
 }
 
+// ── File reference helpers ────────────────────────────────────────────────
+
+function matchFileRef( prompt: string ): Undefinedable<string> {
+	let returnValue: Undefinedable<string>;
+
+	if( "{file:" === prompt.slice( 0, 6 ) && "}" === prompt.slice( -1 ) ) {
+		const inner: string = prompt.slice( 6, -1 );
+
+		if( 0 < inner.length ) {
+			returnValue = inner;
+		}
+		// {file:} (empty inner) returns undefined; parseProfile rejects it,
+		// but the guard here avoids treating empty-string inner as a valid path.
+	}
+
+	return returnValue;
+}
+
+async function resolveFileRef( profile: Profile, directory: string ): Promise<void> {
+	if( undefined !== profile.prompt ) {
+		const filePath: Undefinedable<string> = matchFileRef( profile.prompt );
+
+		if( undefined !== filePath ) {
+			const resolvedAbs: string = isAbsolute( filePath )
+				? filePath
+				: resolvePath( directory, filePath );
+
+			try {
+				profile.prompt = await readFile( resolvedAbs, "utf-8" );
+			} catch( err: unknown ) {
+				throw new Error(
+					`Failed to read ${profile.prompt}: resolved to "${resolvedAbs}" – ${String( err )}`,
+				);
+			}
+		}
+	}
+}
+
 // ── Profile parser ─────────────────────────────────────────────────────────
 
 function parseProfile( value: unknown, section: string ): Profile {
@@ -206,6 +246,11 @@ function parseProfile( value: unknown, section: string ): Profile {
 
 		if( undefined !== obj.prompt ) {
 			assertString( obj.prompt, `${section}.prompt`, true ); // allow empty — replaces default
+
+			if( undefined === matchFileRef( obj.prompt ) && "{file:" === ( obj.prompt ).slice( 0, 6 ) && "}" === obj.prompt.slice( -1 ) ) {
+				throw new Error( `${section}.prompt: {file:} must have a non-empty path` );
+			}
+
 			profile.prompt = obj.prompt;
 		}
 
@@ -396,8 +441,15 @@ function setOutputText( output: { parts: Part[] }, text: string ): void {
 
 // ── Plugin factory ─────────────────────────────────────────────────────────
 
-export const AdvisorPlugin: Plugin = async ( { client }, rawOptions ) => {
+export const AdvisorPlugin: Plugin = async ( { client, directory }, rawOptions ) => {
 	const profiles: { advisor: Profile; btw: Profile } = parseOptions( rawOptions );
+
+	// Resolve {file:...} prompt references
+	await resolveFileRef( profiles.advisor, directory );
+
+	if( profiles.advisor !== profiles.btw ) {
+		await resolveFileRef( profiles.btw, directory );
+	}
 
 	// Tracks whether this plugin registered the default /btw command during config.
 	// When false (user already defined command.btw), the plugin must neither

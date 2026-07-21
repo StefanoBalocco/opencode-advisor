@@ -1,6 +1,6 @@
 {
   "name": "@stefanobalocco/opencode-advisor",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "OpenCode plugin — advisor() tool and /btw command via hidden internal agents",
   "type": "module",
   "main": "plugin.js",

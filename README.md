@@ -77,6 +77,18 @@ change the template), define `command.btw` in your `opencode.json`:
 Providing `prompt` replaces the default system prompt entirely. It does not
 append.
 
+**File reference syntax**: instead of a literal prompt, you may write
+`{file:path}` to load prompt content from a file. The path is relative to the
+project root (the `directory` property of the plugin input), or absolute if it
+starts with `/`. The file is read once, asynchronously during plugin
+initialization — repeated `config` hook invocations do not re-read. A syntax
+error like `{file:}` (empty path) causes a load error that names `{file:}` and
+states the path is empty — no resolved path appears in the message. A missing,
+unreadable, or directory target causes a load error that includes both the
+original reference and the resolved absolute path. Non-exact forms
+(leading/trailing space, missing closing brace, inline text) are treated as
+literal prompts and never trigger I/O.
+
 The `model` value must be in `provider/model` format with a non-empty
 provider and model segment.
 

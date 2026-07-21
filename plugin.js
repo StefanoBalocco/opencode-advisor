@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+import { isAbsolute, resolve as resolvePath } from "node:path";
 import { tool } from "@opencode-ai/plugin";
 const defaultModel = "deepseek/deepseek-v4-pro";
 const advisorAgent = "opencode-advisor:advisor";
@@ -137,6 +139,32 @@ function assertValidOptions(v, path) {
         throw new Error(`${path}: must be a non-array object, got ${null === v ? "null" : typeof v}`);
     }
 }
+function matchFileRef(prompt) {
+    let returnValue;
+    if ("{file:" === prompt.slice(0, 6) && "}" === prompt.slice(-1)) {
+        const inner = prompt.slice(6, -1);
+        if (0 < inner.length) {
+            returnValue = inner;
+        }
+    }
+    return returnValue;
+}
+async function resolveFileRef(profile, directory) {
+    if (undefined !== profile.prompt) {
+        const filePath = matchFileRef(profile.prompt);
+        if (undefined !== filePath) {
+            const resolvedAbs = isAbsolute(filePath)
+                ? filePath
+                : resolvePath(directory, filePath);
+            try {
+                profile.prompt = await readFile(resolvedAbs, "utf-8");
+            }
+            catch (err) {
+                throw new Error(`Failed to read ${profile.prompt}: resolved to "${resolvedAbs}" – ${String(err)}`);
+            }
+        }
+    }
+}
 function parseProfile(value, section) {
     let returnValue;
     if (isPlainObject(value)) {
@@ -162,6 +190,9 @@ function parseProfile(value, section) {
         }
         if (undefined !== obj.prompt) {
             assertString(obj.prompt, `${section}.prompt`, true);
+            if (undefined === matchFileRef(obj.prompt) && "{file:" === (obj.prompt).slice(0, 6) && "}" === obj.prompt.slice(-1)) {
+                throw new Error(`${section}.prompt: {file:} must have a non-empty path`);
+            }
             profile.prompt = obj.prompt;
         }
         if (undefined !== obj.temperature) {
@@ -302,8 +333,12 @@ function setOutputText(output, text) {
         }
     }
 }
-export const AdvisorPlugin = async ({ client }, rawOptions) => {
+export const AdvisorPlugin = async ({ client, directory }, rawOptions) => {
     const profiles = parseOptions(rawOptions);
+    await resolveFileRef(profiles.advisor, directory);
+    if (profiles.advisor !== profiles.btw) {
+        await resolveFileRef(profiles.btw, directory);
+    }
     let ownsBtwCommand = false;
     let defaultBtwCommand;
     return {

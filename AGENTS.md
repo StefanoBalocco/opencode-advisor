@@ -59,6 +59,16 @@ and split forms cannot be mixed.
 Providing `prompt` replaces the entire default system prompt. It is not
 appended.
 
+**File reference**: instead of a literal prompt, use `{file:path}` to load
+content from a file. The path is relative to the project directory, or
+absolute if it starts with `/`. The file is read once during plugin
+initialization (not on config-hook re-invocation). An empty `{file:}` is
+rejected with a syntax error that names `{file:}` and states the path is empty
+— no resolved path is shown. A missing, unreadable, or directory target fails
+with both the original reference and the resolved path in the error. Non-exact
+forms (whitespace, missing `}`, inline text) are literal prompts and never
+I/O.
+
 ### Fixed permission allowlist
 
 Non-configurable. Both hidden agents receive:
