@@ -47,6 +47,7 @@ The `model` field must use `provider/model` format with non-empty provider and m
 | `temperature` | finite number | `0` |
 | `top_p` | finite number | Not set. |
 | `options` | JSON-safe object | Not set. |
+| `failureThreshold` | positive integer | `3` |
 
 A supplied `prompt` replaces the built-in system prompt. The `options` object accepts JSON-safe values, including null, booleans, finite numbers, strings, arrays, and nested plain objects. Use it for provider-specific settings such as `reasoningEffort`.
 
@@ -94,6 +95,44 @@ This policy cannot be overridden. The hidden agent cannot write files, use LSP, 
 7. The plugin deletes the ephemeral session.
 
 The hidden agent can inspect the workspace and public web with read-only tools. It cannot edit files or run arbitrary shell commands.
+
+## Auto-escalation (failureThreshold)
+
+The plugin monitors tool executions and can automatically consult the advisor when a session encounters repeated errors. This feature helps the source agent recover from a failing approach without manual intervention.
+
+### Configuration
+
+Set `failureThreshold` to the number of consecutive tool errors that trigger auto-escalation:
+
+```json
+{ "failureThreshold": 3 }
+```
+
+Default is `3`. Must be a positive integer.
+
+### How auto-escalation works
+
+1. The plugin counts consecutive terminal tool errors per session.
+2. A terminal `completed` tool event resets the counter to zero.
+3. When the threshold is reached, the plugin:
+   - Aborts the failing session.
+   - Resolves the source agent from the conversation.
+   - Creates an ephemeral advisor session with the failure context (tool names + error messages).
+   - Waits for the session to become idle.
+   - Resumes the source agent in a new turn with the advisor's guidance.
+4. Only one intervention fires per streak. A completed tool after the resume re-arms the feature.
+5. `pending` and `running` tool states are ignored.
+
+### Restrictions
+
+- Per-agent opt-out: set `"tools": { "advisor": false }` for any agent in `opencode.json` to prevent auto-escalation for that agent.
+- The plugin ignores tool events from its own ephemeral advisor sessions to prevent infinite recursion.
+- The `advisor()` tool itself never triggers escalation — only non-advisor tool errors count.
+- If the session is deleted during an intervention, the resume is cancelled.
+- Abort cancels the current agent turn. Already terminal tool records remain; running work may stop after partial external side effects.
+- If abort fails, or the source session never reports post-abort idle, no resume is sent and the streak remains latched until a successful tool resets it.
+- No automatic retry, timer, or queue is used for the escalation lifecycle.
+- The advisor tool result card is not used for automatic feedback. OpenCode does not expose programmatic custom-tool invocation; the feedback is a normal session prompt, not a tool-result insertion.
 
 ## Requirements
 

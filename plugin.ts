@@ -1,44 +1,38 @@
 import type { Config as PluginConfig, Plugin } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
-import type { TextPart, TextPartInput } from "@opencode-ai/sdk";
+import type {
+	Event,
+	Part,
+	SessionStatus,
+	TextPart,
+	TextPartInput,
+} from "@opencode-ai/sdk";
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
 const defaultModel: string = "deepseek/deepseek-v4-pro";
+const defaultFailureThreshold: number = 3;
 const advisorAgent: string = "opencode-advisor:advisor";
 
 // ── Default prompts ────────────────────────────────────────────────────────
 
-const advisorDefaultPrompt: string = `You are a strategic advisor for a coding agent. Read the conversation transcript and provide a concise plan or course correction.
+const advisorDefaultPrompt: string = `Act as a strategic advisor to a coding agent. Read the conversation transcript, identify the current objective, and provide a concise plan or course correction.
 
-Your advice must be actionable — tell the executor:
-- What to do next
-- What order to proceed in
-- What to watch out for
-- What not to do
+Give the executor clear, ordered instructions. State what to do next, the sequence to follow, the main risks, and the actions to avoid. Prefer the simplest solution that satisfies the specification. Flag choices that add unnecessary code, indirection, or maintenance burden. When the executor is stuck, repeating failed attempts, or following a disproved assumption, redirect the approach. State plainly when tests, logs, or other evidence contradict the current reasoning.
 
-Key heuristics:
-- Prefer the simplest approach that meets the spec
-- Flag approaches that create maintenance burden
-- If the executor is stuck or looping, suggest a different approach
-- If tests or evidence contradict an assumption, say so explicitly
+Use read-only tools only when they add necessary context. You may inspect the workspace with "read", "glob", and "grep", consult public sources with "webfetch" and "websearch", and load relevant skills. Do not edit files, change system state, or run commands other than read-only shell commands.
 
-You may use read-only tools (read, glob, grep, webfetch, websearch, skill) to inspect the workspace or public web for better context. You may NOT edit files or run arbitrary commands beyond read-only shell commands.
+Respond in fewer than 300 words. Use numbered steps. Do not write code; provide advice only.`;
 
-Respond in under 300 words. Use enumerated steps. Do NOT write code or edit files — only advise.`;
+const advisorToolDescription: string = `Consult a strategic advisor that reads the full conversation and returns a concise plan or course correction.
 
-const advisorToolDescription: string = `Consult a strategic advisor backed by a configurable reviewer model. It reads your full conversation context and provides a concise plan or course correction.
+Call "advisor" before substantive work: writing code, editing files, choosing an interpretation, or relying on an unverified assumption. Complete only the orientation needed to inform the review—locate files, read code, or fetch documentation—then call the advisor. Orientation is not substantive work.
 
-Call advisor BEFORE substantive work — before writing code, editing files, committing to an interpretation, or building on an assumption. If the task requires orientation first (finding files, reading code, fetching docs), do that, then call advisor. Orientation is NOT substantive work.
+Call it again when the approach stalls, errors recur, results contradict expectations, or a different direction appears necessary. Request a final review before declaring the task complete. First preserve the deliverable in its proper durable form by saving files or results and committing only when the task requires a commit.
 
-Also call advisor:
-- When stuck — errors recurring, approach not converging, results that don't fit
-- When considering a change of approach
-- When you believe the task is complete. BEFORE this call, make your deliverable durable: write the file, save the result, commit the change
+For tasks longer than a few steps, consult the advisor before choosing an approach and again before completion. Skip it only on short, reactive turns where tool output directly determines the next action.
 
-On tasks longer than a few steps, call advisor at least once before committing to an approach and once before declaring done. On short reactive turns where tool output directly dictates the next action, skip advisor.
-
-Give the advice serious weight. Only override if you have primary-source evidence that contradicts a specific claim. Surface conflicts in another advisor call rather than silently switching approaches.`;
+Give the advice serious weight. Override a specific recommendation only when primary-source evidence disproves it. Present the conflict in another advisor call instead of changing course silently.`;
 
 // ── Fixed permission policy ────────────────────────────────────────────────
 // Object property order matters: later matching rules override the wildcard deny.
@@ -84,6 +78,7 @@ interface Profile {
 	temperature?: number;
 	top_p?: number;
 	options?: Record<string, unknown>;
+	failureThreshold?: number;
 }
 
 // ── General utility types ────────────────────────────────────────────────────
@@ -98,6 +93,7 @@ const profileKeys: Set<string> = new Set( [
 	"temperature",
 	"top_p",
 	"options",
+	"failureThreshold",
 ] );
 
 // ── Validation helpers ─────────────────────────────────────────────────────
@@ -215,6 +211,14 @@ function parseProfile( value: unknown, section: string ): Profile {
 			profile.options = structuredClone( obj.options ) as Record<string, unknown>;
 		}
 
+		if( undefined !== obj.failureThreshold ) {
+			assertFiniteNumber( obj.failureThreshold, `${section}.failureThreshold` );
+			if( !Number.isInteger( obj.failureThreshold ) || ( 1 > obj.failureThreshold ) ) {
+				throw new Error( `${section}.failureThreshold: must be a positive integer` );
+			}
+			profile.failureThreshold = obj.failureThreshold;
+		}
+
 		returnValue = profile;
 	} else if( undefined === value ) {
 		returnValue = {};
@@ -320,19 +324,327 @@ function textPart( t: string ): TextPartInput {
 	return { type: "text", text: t };
 }
 
+// ── Event state types ──────────────────────────────────────────────────────
+
+interface FailureDetail {
+	tool: string;
+	error: string;
+}
+
+interface SessionState {
+	count: number;
+	failures: Array<FailureDetail>;
+	triggered: boolean;
+	intervening: boolean;
+	awaitingIdle: boolean;
+	idle: boolean;
+	idleGeneration: number;
+	deleted: boolean;
+	sourceAgent: string;
+	advice: string;
+}
+
+function createSessionState(): SessionState {
+	return {
+		count: 0,
+		failures: [],
+		triggered: false,
+		intervening: false,
+		awaitingIdle: false,
+		idle: false,
+		idleGeneration: 0,
+		deleted: false,
+		sourceAgent: "",
+		advice: "",
+	};
+}
+
 // ── Plugin factory ─────────────────────────────────────────────────────────
 
 export const AdvisorPlugin: Plugin = async ( { client }, rawOptions ) => {
 	const advisorProfile: Profile = parseProfile( rawOptions, "plugin options" );
+	const failureThreshold: number = advisorProfile.failureThreshold ?? defaultFailureThreshold;
+
+	// Factory-local event state (isolated per plugin instance)
+	const advisorSessions: Set<string> = new Set();
+	const sessionStates: Map<string, SessionState> = new Map();
+	let resolvedCfg: Undefinedable<PluginConfig>;
+
+	// ── Shared advisor lifecycle ───────────────────────────────────────────
+
+	async function _callAdvisor( transcript: string ): Promise<string> {
+		let returnValue: string;
+		const createRes: { data?: { id?: string } } = await client.session.create( {
+			body: { title: "advisor-subcall" },
+		} );
+		const tempID: Undefinedable<string> = createRes.data?.id;
+
+		if( !tempID ) {
+			returnValue = "Advisor error: failed to create ephemeral session.";
+		} else {
+			advisorSessions.add( tempID );
+			try {
+				const response: { data?: { parts?: Array<{ type: string; text?: string }> } } = await client.session.prompt( {
+					path: { id: tempID },
+					body: {
+						agent: advisorAgent,
+						parts: [ textPart( transcript ) ],
+					},
+				} );
+
+				const text: Undefinedable<string> = response.data?.parts
+					?.filter( ( p: { type: string; text?: string } ): p is TextPart => "text" === p.type )
+					.map( ( p: TextPart ): string => p.text )
+					.join( "\n" );
+
+				returnValue = text || "Advisor returned no advice.";
+			} finally {
+				advisorSessions.delete( tempID );
+				await client.session
+					.delete( { path: { id: tempID } } )
+					.catch( () => { /* ignore cleanup failure */ } );
+			}
+		}
+
+		return returnValue;
+	}
+
+	// ── Intervention orchestration ─────────────────────────────────────────
+
+	function _maybeResume( sessionID: string, state: SessionState ): void {
+		if( !state.deleted && state.intervening && state.idle && state.sourceAgent && state.advice ) {
+			state.intervening = false;
+			state.awaitingIdle = false;
+			// Fire-and-forget: never block event bus on prompt
+			client.session.prompt( {
+				path: { id: sessionID },
+				body: {
+					agent: state.sourceAgent,
+					parts: [ textPart( state.advice + "\n\nContinue the task using this advice." ) ],
+				},
+			} ).catch( () => { /* swallow resume rejection */ } );
+		}
+	}
+
+	async function _launchIntervention(
+		sessionID: string,
+		messageID: string,
+		state: SessionState,
+	): Promise<void> {
+		// Step 1: fetch messages to resolve source agent
+		let msgs: Undefinedable<Array<{ info: { role: string; id: string }; parts: Array<{ type: string; text?: string }> }>>;
+		let fetchOk: boolean = true;
+		try {
+			const msgsRes: { data?: Array<{ info: { role: string; id: string }; parts: Array<{ type: string; text?: string }> }> } = await client.session.messages( {
+				path: { id: sessionID },
+			} );
+			msgs = msgsRes.data;
+		} catch {
+			fetchOk = false;
+		}
+
+		if( fetchOk && msgs ) {
+			// Resolve source agent: assistant message messageID → parentID → user message → agent
+			let assistantMsgInfo: Undefinedable<{ info: { role: string; id: string }; parts: Array<{ type: string; text?: string }> }>;
+			let userMsgInfo: Undefinedable<{ info: { role: string; id: string; agent?: string }; parts: Array<{ type: string; text?: string }> }>;
+			let parentID: Undefinedable<string>;
+
+			for( const msg of msgs ) {
+				if( "assistant" === msg.info.role && msg.info.id === messageID ) {
+					assistantMsgInfo = msg;
+					break;
+				}
+			}
+
+			if( assistantMsgInfo ) {
+				parentID = ( assistantMsgInfo.info as { role: string; id: string; parentID?: string } ).parentID;
+			}
+
+			if( parentID ) {
+				for( const msg of msgs ) {
+					if( "user" === msg.info.role && msg.info.id === parentID ) {
+						userMsgInfo = msg as { info: { role: string; id: string; agent?: string }; parts: Array<{ type: string; text?: string }> };
+						break;
+					}
+				}
+			}
+
+			const sourceAgent: string = userMsgInfo?.info?.agent ?? "";
+
+			if( sourceAgent ) {
+				// Check eligibility: tools.advisor must not be explicitly false
+				let agentEligible: boolean = true;
+				if( resolvedCfg?.agent?.[ sourceAgent ]?.tools?.advisor === false ) {
+					agentEligible = false;
+				}
+
+				if( agentEligible ) {
+					state.sourceAgent = sourceAgent;
+
+					// Step 2: abort the session (awaitingIdle set only after success)
+					let abortOk: boolean = false;
+					try {
+						const abortRes: { data?: boolean } = await client.session.abort( {
+							path: { id: sessionID },
+						} );
+						abortOk = true === abortRes.data;
+					} catch {
+						abortOk = false;
+					}
+
+					if( abortOk ) {
+						// Step 3: start post-abort idle-wait phase
+						state.awaitingIdle = true;
+						state.idle = false;
+
+						// Step 4: check current status to close idle-before-wait race.
+						// Capture generation before async query so a concurrent event
+						// (idle, busy, retry) can invalidate a stale query result.
+						const capturedGeneration: number = state.idleGeneration;
+						try {
+							const statusRes: { data?: Record<string, SessionStatus> } = await client.session.status();
+							// Only apply query result if no event advanced the generation
+							if( capturedGeneration === state.idleGeneration ) {
+								const sessStatus: Undefinedable<SessionStatus> = statusRes.data?.[ sessionID ];
+								if( sessStatus ) {
+									state.idle = ( "idle" === sessStatus.type );
+								} else {
+									state.idle = false;
+								}
+							}
+						} catch {
+							// non-idle, wait for event; generation unchanged, no event lost
+						}
+
+						// Step 5: build advisor input with failure context
+						const transcript: string = formatTranscript( msgs, "" );
+						const failureBlock: string = state.failures
+							.map( ( f: FailureDetail ): string => `Tool: ${f.tool}\nError: ${f.error}` )
+							.join( "\n\n" );
+
+						const advisorInput: string = transcript
+							? `${transcript}\n\n--- Recent tool failures ---\n${failureBlock}`
+							: `--- Tool failures ---\n${failureBlock}\n\nContinue the task reassessing the approach.`;
+
+						// Step 6: call advisor
+						let advice: string;
+						try {
+							const rawAdvice: string = await _callAdvisor( advisorInput );
+							// Manual-facing unusable strings must be replaced with fallback for auto path
+							if( "Advisor returned no advice." === rawAdvice || "Advisor error: failed to create ephemeral session." === rawAdvice ) {
+								advice = "Reassess the failed approach and continue working.";
+							} else {
+								advice = rawAdvice;
+							}
+						} catch {
+							advice = "Reassess the failed approach and continue working.";
+						}
+						state.advice = advice;
+
+						// Step 7: attempt resume
+						_maybeResume( sessionID, state );
+					} else {
+						// Abort failed, clear intervening but keep triggered latched
+						state.intervening = false;
+					}
+				} else {
+					// Agent opted out, clear intervention
+					state.intervening = false;
+				}
+			} else {
+				// No source agent resolvable, clear intervention
+				state.intervening = false;
+			}
+		} else {
+			// Messages unavailable, clear intervention
+			state.intervening = false;
+		}
+	}
+
+	// ── Plugin hooks ───────────────────────────────────────────────────────
 
 	return {
 		config: async ( cfg: PluginConfig ): Promise<void> => {
+			resolvedCfg = cfg;
+
 			const advisorCfg: Record<string, unknown> = buildAgentConfig( advisorProfile, advisorDefaultPrompt, cfg );
 
 			// cfg.agent uses an index signature allowing arbitrary agent names
 			const agents: NonNullable<PluginConfig[ "agent" ]> = cfg.agent ?? {};
 			agents[ advisorAgent ] = advisorCfg as ( typeof agents )[ string ];
 			cfg.agent = agents;
+		},
+
+		event: async ( { event }: { event: Event } ): Promise<void> => {
+			if( "message.part.updated" === event.type ) {
+				const part: Part = event.properties.part;
+				if( "tool" === part.type && !advisorSessions.has( part.sessionID ) ) {
+					const sessionID: string = part.sessionID;
+					let state: Undefinedable<SessionState> = sessionStates.get( sessionID );
+
+					if( state && state.intervening ) {
+						// Skip all tool events during intervention
+					} else if( "error" === part.state.status ) {
+						// Ignore advisor tool errors to prevent recursion
+						if( "advisor" !== part.tool ) {
+							if( !state ) {
+								state = createSessionState();
+								sessionStates.set( sessionID, state );
+							}
+
+							// Keep failures bounded to threshold
+							if( state.failures.length >= failureThreshold ) {
+								state.failures.shift();
+							}
+							state.failures.push( { tool: part.tool, error: part.state.error } );
+							state.count = state.failures.length;
+
+							if( state.count >= failureThreshold && !state.triggered ) {
+								state.triggered = true;
+								state.intervening = true;
+								void _launchIntervention( sessionID, part.messageID, state );
+							}
+						}
+					} else if( "completed" === part.state.status ) {
+						// Completed tool resets the streak
+						if( !state ) {
+							state = createSessionState();
+							sessionStates.set( sessionID, state );
+						}
+						state.count = 0;
+						state.failures = [];
+						state.triggered = false;
+					}
+				}
+			} else if( "session.idle" === event.type ) {
+				const sessID: string = event.properties.sessionID;
+				const state: Undefinedable<SessionState> = sessionStates.get( sessID );
+				if( state && state.awaitingIdle ) {
+					state.idleGeneration++;
+					state.idle = true;
+					_maybeResume( sessID, state );
+				}
+			} else if( "session.status" === event.type ) {
+				const sessID: string = event.properties.sessionID;
+				const state: Undefinedable<SessionState> = sessionStates.get( sessID );
+				if( state && state.awaitingIdle ) {
+					if( "idle" === event.properties.status.type ) {
+						state.idleGeneration++;
+						state.idle = true;
+						_maybeResume( sessID, state );
+					} else if( "busy" === event.properties.status.type || "retry" === event.properties.status.type ) {
+						state.idleGeneration++;
+						state.idle = false;
+					}
+				}
+			} else if( "session.deleted" === event.type ) {
+				const sessID: string = event.properties.info.id;
+				const state: Undefinedable<SessionState> = sessionStates.get( sessID );
+				if( state ) {
+					state.deleted = true;
+				}
+				sessionStates.delete( sessID );
+			}
 		},
 
 		tool: {
@@ -360,38 +672,10 @@ export const AdvisorPlugin: Plugin = async ( { client }, rawOptions ) => {
 							if( !transcript ) {
 								returnValue = "Advisor declined: no prior conversation to analyze.";
 							} else {
-								const createRes: { data?: { id?: string } } = await client.session.create( {
-									body: { title: "advisor-subcall" },
-								} );
-								const tempID: Undefinedable<string> = createRes.data?.id;
-
-								if( !tempID ) {
-									returnValue = "Advisor error: failed to create ephemeral session.";
-								} else {
-									try {
-										const response: { data?: { parts?: Array<{ type: string; text?: string }> } } = await client.session.prompt( {
-											path: { id: tempID },
-											body: {
-												agent: advisorAgent,
-												parts: [ textPart( transcript ) ],
-											},
-										} );
-
-										const text: Undefinedable<string> = response.data?.parts
-											?.filter( ( p: { type: string; text?: string } ): p is TextPart => "text" === p.type )
-											.map( ( p: TextPart ): string => p.text )
-											.join( "\n" );
-
-										returnValue = text || "Advisor returned no advice.";
-									} finally {
-										await client.session
-											.delete( { path: { id: tempID } } )
-											.catch( () => { /* ignore cleanup failure */ } );
-									}
-								}
+								returnValue = await _callAdvisor( transcript );
 							}
-		} catch( err: unknown ) {
-			returnValue = `Advisor error: ${String( err )}`;
+						} catch( err: unknown ) {
+							returnValue = `Advisor error: ${String( err )}`;
 						} finally {
 							inAdvisorCall = false;
 						}

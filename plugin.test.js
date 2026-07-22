@@ -1,5 +1,15 @@
 import test from "ava";
 import { AdvisorPlugin } from "./plugin.js";
+function createPromptRecording() {
+    return {
+        promptSessionID: undefined,
+        promptAgent: undefined,
+        promptNoReply: undefined,
+        promptSynthetic: undefined,
+        promptText: undefined,
+        prompts: [],
+    };
+}
 function toolContext(sessionID, messageID) {
     return {
         sessionID,
@@ -10,6 +20,106 @@ function toolContext(sessionID, messageID) {
         abort: new AbortController().signal,
         metadata: () => { },
         ask: async () => { },
+    };
+}
+function errorToolPartEvent(sessionID, messageID, tool, error, callID = "call-1") {
+    return {
+        type: "message.part.updated",
+        properties: {
+            part: {
+                id: `part-${callID}`,
+                sessionID,
+                messageID,
+                type: "tool",
+                callID,
+                tool,
+                state: {
+                    status: "error",
+                    error,
+                    input: {},
+                    time: { start: 100, end: 200 },
+                },
+            },
+            delta: undefined,
+        },
+    };
+}
+function completedToolPartEvent(sessionID, messageID, tool, callID = "call-1") {
+    return {
+        type: "message.part.updated",
+        properties: {
+            part: {
+                id: `part-${callID}`,
+                sessionID,
+                messageID,
+                type: "tool",
+                callID,
+                tool,
+                state: {
+                    status: "completed",
+                    output: "success",
+                    title: "Completed",
+                    input: {},
+                    metadata: {},
+                    time: { start: 100, end: 200 },
+                },
+            },
+            delta: undefined,
+        },
+    };
+}
+function pendingToolPartEvent(sessionID, messageID, tool, callID = "call-1") {
+    return {
+        type: "message.part.updated",
+        properties: {
+            part: {
+                id: `part-${callID}`,
+                sessionID,
+                messageID,
+                type: "tool",
+                callID,
+                tool,
+                state: {
+                    status: "pending",
+                    input: {},
+                    raw: "",
+                },
+            },
+            delta: undefined,
+        },
+    };
+}
+function runningToolPartEvent(sessionID, messageID, tool, callID = "call-1") {
+    return {
+        type: "message.part.updated",
+        properties: {
+            part: {
+                id: `part-${callID}`,
+                sessionID,
+                messageID,
+                type: "tool",
+                callID,
+                tool,
+                state: {
+                    status: "running",
+                    input: {},
+                    time: { start: 100 },
+                },
+            },
+            delta: undefined,
+        },
+    };
+}
+function sessionIdleEvent(sessionID) {
+    return {
+        type: "session.idle",
+        properties: { sessionID },
+    };
+}
+function sessionDeletedEvent(sessionID) {
+    return {
+        type: "session.deleted",
+        properties: { info: { id: sessionID } },
     };
 }
 function createMockSession(overrides = {}) {
@@ -29,6 +139,12 @@ function createMockSession(overrides = {}) {
             data: { parts: [{ type: "text", text: "Advisor response" }] },
         })),
         delete: (async () => { }),
+        abort: (async () => ({
+            data: true,
+        })),
+        status: (async () => ({
+            data: {},
+        })),
     };
     for (const key of Object.keys(overrides)) {
         session[key] = overrides[key];
@@ -254,6 +370,36 @@ test.serial("permission: complete fixed policy deep equality", async (t) => {
     t.is(bash["rtk grep *"], undefined);
     const expectedBashKeys = ["*", "wc *", "git log *", "git diff *", "git show *", "rtk wc *", "rtk git log *", "rtk git diff *", "rtk git show *"];
     t.deepEqual(Object.keys(bash).sort(), expectedBashKeys.sort());
+});
+test.serial("profile: failureThreshold 1 accepted", async (t) => {
+    const cfg = createMockConfig();
+    const plugin = await AdvisorPlugin(createPluginInput(createMockSession()), { failureThreshold: 1 });
+    await plugin.config(cfg);
+    t.pass();
+});
+test.serial("profile: failureThreshold 5 accepted", async (t) => {
+    const cfg = createMockConfig();
+    const plugin = await AdvisorPlugin(createPluginInput(createMockSession()), { failureThreshold: 5 });
+    await plugin.config(cfg);
+    t.pass();
+});
+test.serial("profile: failureThreshold 0 throws", async (t) => {
+    await t.throwsAsync(async () => { await AdvisorPlugin(createPluginInput(createMockSession()), { failureThreshold: 0 }); }, { message: /failureThreshold/ });
+});
+test.serial("profile: failureThreshold -1 throws", async (t) => {
+    await t.throwsAsync(async () => { await AdvisorPlugin(createPluginInput(createMockSession()), { failureThreshold: -1 }); }, { message: /failureThreshold/ });
+});
+test.serial("profile: failureThreshold 2.5 throws", async (t) => {
+    await t.throwsAsync(async () => { await AdvisorPlugin(createPluginInput(createMockSession()), { failureThreshold: 2.5 }); }, { message: /failureThreshold/ });
+});
+test.serial("profile: failureThreshold NaN throws", async (t) => {
+    await t.throwsAsync(async () => { await AdvisorPlugin(createPluginInput(createMockSession()), { failureThreshold: NaN }); }, { message: /failureThreshold/ });
+});
+test.serial("profile: failureThreshold Infinity throws", async (t) => {
+    await t.throwsAsync(async () => { await AdvisorPlugin(createPluginInput(createMockSession()), { failureThreshold: Infinity }); }, { message: /failureThreshold/ });
+});
+test.serial("profile: failureThreshold string throws", async (t) => {
+    await t.throwsAsync(async () => { await AdvisorPlugin(createPluginInput(createMockSession()), { failureThreshold: "3" }); }, { message: /failureThreshold/ });
 });
 test.serial("profile: invalid model format — no slash", async (t) => {
     await t.throwsAsync(async () => { await AdvisorPlugin(createPluginInput(createMockSession()), { model: "model-without-slash" }); }, { message: /must be "provider\/model"/ });
@@ -646,4 +792,975 @@ test.serial("transcript: parts with null text use empty string fallback", async 
     const result = await plugin.tool.advisor.execute({}, toolContext("sess-nulltxt", "msg-other"));
     t.is(result, "Advisor declined: no prior conversation to analyze.");
 });
-//# sourceMappingURL=plugin.test.js.map
+test.serial("event: two errors at default threshold do not abort, third does", async (t) => {
+    let abortCallCount = 0;
+    const msgsData = [
+        { info: { role: "user", id: "user-msg", agent: "test-agent" }, parts: [{ type: "text", text: "Task" }] },
+        { info: { role: "assistant", id: "asst-msg", parentID: "user-msg" }, parts: [] },
+    ];
+    const session = createMockSession({
+        messages: (async () => ({ data: msgsData })),
+        abort: (async () => {
+            abortCallCount++;
+            return { data: true };
+        }),
+    });
+    const plugin = await AdvisorPlugin(createPluginInput(session), undefined);
+    await plugin.config(createMockConfig());
+    await plugin.event({ event: errorToolPartEvent("sess-e1", "asst-msg", "read", "err1", "call-1") });
+    await plugin.event({ event: errorToolPartEvent("sess-e1", "asst-msg", "read", "err2", "call-2") });
+    t.is(abortCallCount, 0);
+    await plugin.event({ event: errorToolPartEvent("sess-e1", "asst-msg", "read", "err3", "call-3") });
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+    t.is(abortCallCount, 1);
+});
+test.serial("event: custom failureThreshold honored", async (t) => {
+    let abortCallCount = 0;
+    const msgsData = [
+        { info: { role: "user", id: "user-msg", agent: "test-agent" }, parts: [{ type: "text", text: "Task" }] },
+        { info: { role: "assistant", id: "asst-msg", parentID: "user-msg" }, parts: [] },
+    ];
+    const session = createMockSession({
+        messages: (async () => ({ data: msgsData })),
+        abort: (async () => {
+            abortCallCount++;
+            return { data: true };
+        }),
+    });
+    const plugin = await AdvisorPlugin(createPluginInput(session), { failureThreshold: 1 });
+    await plugin.config(createMockConfig());
+    await plugin.event({ event: errorToolPartEvent("sess-cust", "asst-msg", "read", "err", "call-1") });
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+    t.is(abortCallCount, 1);
+});
+test.serial("event: completed tool resets streak", async (t) => {
+    let abortCallCount = 0;
+    const msgsData = [
+        { info: { role: "user", id: "user-msg", agent: "test-agent" }, parts: [{ type: "text", text: "Task" }] },
+        { info: { role: "assistant", id: "asst-msg", parentID: "user-msg" }, parts: [] },
+    ];
+    const session = createMockSession({
+        messages: (async () => ({ data: msgsData })),
+        abort: (async () => {
+            abortCallCount++;
+            return { data: true };
+        }),
+    });
+    const plugin = await AdvisorPlugin(createPluginInput(session), { failureThreshold: 2 });
+    await plugin.config(createMockConfig());
+    await plugin.event({ event: errorToolPartEvent("sess-reset", "asst-msg", "read", "err1", "call-1") });
+    await plugin.event({ event: completedToolPartEvent("sess-reset", "asst-msg", "read", "call-2") });
+    await plugin.event({ event: errorToolPartEvent("sess-reset", "asst-msg", "read", "err2", "call-3") });
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+    t.is(abortCallCount, 0, "reset prevents threshold from being reached");
+});
+test.serial("event: streaks isolated per session ID", async (t) => {
+    let abortCallCount = 0;
+    const msgsData = [
+        { info: { role: "user", id: "user-msg", agent: "test-agent" }, parts: [{ type: "text", text: "Task" }] },
+        { info: { role: "assistant", id: "asst-msg", parentID: "user-msg" }, parts: [] },
+    ];
+    const session = createMockSession({
+        messages: (async () => ({ data: msgsData })),
+        abort: (async () => {
+            abortCallCount++;
+            return { data: true };
+        }),
+    });
+    const plugin = await AdvisorPlugin(createPluginInput(session), { failureThreshold: 3 });
+    await plugin.config(createMockConfig());
+    await plugin.event({ event: errorToolPartEvent("sess-A", "asst-msg", "read", "a1", "ca-1") });
+    await plugin.event({ event: errorToolPartEvent("sess-A", "asst-msg", "read", "a2", "ca-2") });
+    await plugin.event({ event: errorToolPartEvent("sess-B", "asst-msg", "read", "b1", "cb-1") });
+    await plugin.event({ event: errorToolPartEvent("sess-B", "asst-msg", "read", "b2", "cb-2") });
+    await plugin.event({ event: errorToolPartEvent("sess-B", "asst-msg", "read", "b3", "cb-3") });
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+    t.is(abortCallCount, 1, "only session B reaches threshold");
+});
+test.serial("event: pending and running tool states do nothing", async (t) => {
+    let abortCallCount = 0;
+    const session = createMockSession({
+        abort: (async () => {
+            abortCallCount++;
+            return { data: true };
+        }),
+    });
+    const plugin = await AdvisorPlugin(createPluginInput(session), { failureThreshold: 1 });
+    await plugin.config(createMockConfig());
+    await plugin.event({ event: pendingToolPartEvent("sess-p", "asst-m", "read", "c1") });
+    await plugin.event({ event: runningToolPartEvent("sess-p", "asst-m", "read", "c2") });
+    await new Promise((resolve) => { setTimeout(resolve, 30); });
+    t.is(abortCallCount, 0, "pending/running must not be counted");
+});
+test.serial("event: advisor tool error does not increment", async (t) => {
+    let abortCallCount = 0;
+    const session = createMockSession({
+        abort: (async () => {
+            abortCallCount++;
+            return { data: true };
+        }),
+    });
+    const plugin = await AdvisorPlugin(createPluginInput(session), { failureThreshold: 1 });
+    await plugin.config(createMockConfig());
+    await plugin.event({ event: errorToolPartEvent("sess-adv", "asst-m", "advisor", "err", "c1") });
+    await new Promise((resolve) => { setTimeout(resolve, 30); });
+    t.is(abortCallCount, 0, "advisor tool error must not trigger intervention");
+});
+test.serial("event: completed advisor tool resets streak like any tool", async (t) => {
+    const msgsData = [
+        { info: { role: "user", id: "user-msg", agent: "test-agent" }, parts: [{ type: "text", text: "Task" }] },
+        { info: { role: "assistant", id: "asst-msg", parentID: "user-msg" }, parts: [] },
+    ];
+    const session = createMockSession({
+        messages: (async () => ({ data: msgsData })),
+    });
+    const plugin = await AdvisorPlugin(createPluginInput(session), { failureThreshold: 2 });
+    await plugin.config(createMockConfig());
+    let eventCount = 0;
+    const origEvent = plugin.event;
+    plugin.event = async (input) => {
+        eventCount++;
+        await origEvent(input);
+    };
+    await plugin.event({ event: errorToolPartEvent("sess-acr", "asst-msg", "read", "e1", "c1") });
+    await plugin.event({ event: completedToolPartEvent("sess-acr", "asst-msg", "advisor", "c2") });
+    await plugin.event({ event: errorToolPartEvent("sess-acr", "asst-msg", "read", "e2", "c3") });
+    t.is(eventCount, 3, "all events processed");
+    t.pass("completed advisor tool resets streak");
+});
+test.serial("event: auto-created advisor session events are ignored", async (t) => {
+    let abortCallCount = 0;
+    const msgsData = [
+        { info: { role: "user", id: "user-msg", agent: "test-agent" }, parts: [{ type: "text", text: "Task" }] },
+        { info: { role: "assistant", id: "asst-msg", parentID: "user-msg" }, parts: [] },
+    ];
+    const session = createMockSession({
+        messages: (async () => ({ data: msgsData })),
+        abort: (async () => {
+            abortCallCount++;
+            return { data: true };
+        }),
+    });
+    const recording = createPromptRecording();
+    session.prompt = (async (args) => {
+        const body = args.body;
+        recording.prompts.push({
+            sessionID: args.path?.id,
+            agent: body.agent,
+            text: body.parts?.[0]?.text,
+        });
+        return { data: { parts: [{ type: "text", text: "Advice" }] } };
+    });
+    const plugin = await AdvisorPlugin(createPluginInput(session), { failureThreshold: 2 });
+    await plugin.config(createMockConfig());
+    await plugin.event({ event: errorToolPartEvent("sess-isol", "asst-msg", "read", "e1", "c1") });
+    await plugin.event({ event: errorToolPartEvent("sess-isol", "asst-msg", "read", "e2", "c2") });
+    await new Promise((resolve) => { setTimeout(resolve, 100); });
+    const advisorPrompts = recording.prompts.filter((p) => "opencode-advisor:advisor" === p.agent).length;
+    t.true(0 < advisorPrompts, "advisor session was created");
+    t.pass("advisor session events are excluded from counting");
+});
+test.serial("event: tools.advisor false prevents intervention", async (t) => {
+    let abortCallCount = 0;
+    const msgsData = [
+        { info: { role: "user", id: "user-msg", agent: "no-advisor-agent" }, parts: [{ type: "text", text: "Task" }] },
+        { info: { role: "assistant", id: "asst-msg", parentID: "user-msg" }, parts: [] },
+    ];
+    const session = createMockSession({
+        messages: (async () => ({ data: msgsData })),
+        abort: (async () => {
+            abortCallCount++;
+            return { data: true };
+        }),
+    });
+    const plugin = await AdvisorPlugin(createPluginInput(session), { failureThreshold: 1 });
+    const cfg = createMockConfig();
+    cfg.agent["no-advisor-agent"] = { tools: { advisor: false } };
+    await plugin.config(cfg);
+    await plugin.event({ event: errorToolPartEvent("sess-opt", "asst-msg", "read", "err", "c1") });
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+    t.is(abortCallCount, 0, "no intervention when agent opts out");
+});
+test.serial("event: missing source agent causes no intervention", async (t) => {
+    let abortCallCount = 0;
+    const msgsData = [
+        { info: { role: "user", id: "user-msg" }, parts: [{ type: "text", text: "Task" }] },
+        { info: { role: "assistant", id: "asst-msg", parentID: "user-msg" }, parts: [] },
+    ];
+    const session = createMockSession({
+        messages: (async () => ({ data: msgsData })),
+        abort: (async () => {
+            abortCallCount++;
+            return { data: true };
+        }),
+    });
+    const plugin = await AdvisorPlugin(createPluginInput(session), { failureThreshold: 1 });
+    await plugin.config(createMockConfig());
+    await plugin.event({ event: errorToolPartEvent("sess-noagent", "asst-msg", "read", "err", "c1") });
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+    t.is(abortCallCount, 0, "no intervention when source agent is missing");
+});
+test.serial("event: absent agent is eligible when tools.advisor is not explicitly false", async (t) => {
+    let abortCallCount = 0;
+    const msgsData = [
+        { info: { role: "user", id: "user-msg", agent: "some-agent" }, parts: [{ type: "text", text: "Task" }] },
+        { info: { role: "assistant", id: "asst-msg", parentID: "user-msg" }, parts: [] },
+    ];
+    const session = createMockSession({
+        messages: (async () => ({ data: msgsData })),
+        abort: (async () => {
+            abortCallCount++;
+            return { data: true };
+        }),
+    });
+    const plugin = await AdvisorPlugin(createPluginInput(session), { failureThreshold: 1 });
+    const cfg = createMockConfig();
+    cfg.agent["some-agent"] = { tools: {} };
+    await plugin.config(cfg);
+    await plugin.event({ event: errorToolPartEvent("sess-elig", "asst-msg", "read", "err", "c1") });
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+    t.is(abortCallCount, 1, "agent without explicit tools.advisor false is eligible");
+});
+test.serial("event: advisor prompt includes tool names and error messages", async (t) => {
+    const msgsData = [
+        { info: { role: "user", id: "user-msg", agent: "test-agent" }, parts: [{ type: "text", text: "Task" }] },
+        { info: { role: "assistant", id: "asst-msg", parentID: "user-msg" }, parts: [] },
+    ];
+    const recording = createPromptRecording();
+    const session = createMockSession({
+        messages: (async () => ({ data: msgsData })),
+        abort: (async () => ({ data: true })),
+        prompt: (async (args) => {
+            const body = args.body;
+            recording.prompts.push({
+                sessionID: args.path?.id,
+                agent: body.agent,
+                text: body.parts?.[0]?.text,
+            });
+            return { data: { parts: [{ type: "text", text: "Strategic advice" }] } };
+        }),
+    });
+    const plugin = await AdvisorPlugin(createPluginInput(session), { failureThreshold: 2 });
+    await plugin.config(createMockConfig());
+    await plugin.event({ event: errorToolPartEvent("sess-pf", "asst-msg", "read", "File not found", "c1") });
+    await plugin.event({ event: errorToolPartEvent("sess-pf", "asst-msg", "edit", "Permission denied", "c2") });
+    await new Promise((resolve) => { setTimeout(resolve, 100); });
+    const advisorPrompt = recording.prompts.find((p) => "opencode-advisor:advisor" === p.agent && undefined !== p.text);
+    t.truthy(advisorPrompt, "advisor was prompted");
+    t.truthy(advisorPrompt.text.includes("read"), "prompt must mention tool name 'read'");
+    t.truthy(advisorPrompt.text.includes("File not found"), "prompt must mention first error");
+    t.truthy(advisorPrompt.text.includes("edit"), "prompt must mention tool name 'edit'");
+    t.truthy(advisorPrompt.text.includes("Permission denied"), "prompt must mention second error");
+});
+test.serial("event: resume waits for both idle event and advisor response", async (t) => {
+    const msgsData = [
+        { info: { role: "user", id: "user-msg", agent: "test-agent" }, parts: [{ type: "text", text: "Task" }] },
+        { info: { role: "assistant", id: "asst-msg", parentID: "user-msg" }, parts: [] },
+    ];
+    const recording = createPromptRecording();
+    let resolveAdvisorPrompt = () => { };
+    const advisorDeferred = new Promise((resolve) => {
+        resolveAdvisorPrompt = resolve;
+    });
+    let advisorPromptCount = 0;
+    const session = createMockSession({
+        messages: (async () => ({ data: msgsData })),
+        abort: (async () => ({ data: true })),
+        create: (async () => ({ data: { id: "temp-adv-wait" } })),
+        prompt: (async (args) => {
+            const body = args.body;
+            const sessID = args.path?.id ?? "";
+            recording.prompts.push({
+                sessionID: sessID,
+                agent: body.agent,
+                text: body.parts?.[0]?.text,
+            });
+            advisorPromptCount++;
+            if (1 === advisorPromptCount) {
+                await advisorDeferred;
+            }
+            return { data: { parts: [{ type: "text", text: "Deferred advice" }] } };
+        }),
+    });
+    const plugin = await AdvisorPlugin(createPluginInput(session), { failureThreshold: 2 });
+    await plugin.config(createMockConfig());
+    await plugin.event({ event: errorToolPartEvent("sess-order", "asst-msg", "read", "e1", "c1") });
+    await plugin.event({ event: errorToolPartEvent("sess-order", "asst-msg", "read", "e2", "c2") });
+    await new Promise((resolve) => { setTimeout(resolve, 30); });
+    await plugin.event({ event: sessionIdleEvent("sess-order") });
+    await new Promise((resolve) => { setTimeout(resolve, 30); });
+    const resumePromptsBefore = recording.prompts.filter((p) => "test-agent" === p.agent).length;
+    t.is(resumePromptsBefore, 0, "no resume before advisor response");
+    resolveAdvisorPrompt(undefined);
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+    const resumePromptsAfter = recording.prompts.filter((p) => "test-agent" === p.agent).length;
+    t.is(resumePromptsAfter, 1, "resume after both idle and advisor response");
+});
+test.serial("event: resume prompt format", async (t) => {
+    const msgsData = [
+        { info: { role: "user", id: "user-msg", agent: "test-agent" }, parts: [{ type: "text", text: "Task" }] },
+        { info: { role: "assistant", id: "asst-msg", parentID: "user-msg" }, parts: [] },
+    ];
+    const recording = createPromptRecording();
+    const session = createMockSession({
+        messages: (async () => ({ data: msgsData })),
+        abort: (async () => ({ data: true })),
+        status: (async () => ({
+            data: { "sess-fmt": { type: "idle" } },
+        })),
+        prompt: (async (args) => {
+            const body = args.body;
+            recording.prompts.push({
+                sessionID: args.path?.id,
+                agent: body.agent,
+                text: body.parts?.[0]?.text,
+            });
+            return { data: { parts: [{ type: "text", text: "Advice" }] } };
+        }),
+    });
+    const plugin = await AdvisorPlugin(createPluginInput(session), { failureThreshold: 2 });
+    await plugin.config(createMockConfig());
+    await plugin.event({ event: errorToolPartEvent("sess-fmt", "asst-msg", "read", "e1", "c1") });
+    await plugin.event({ event: errorToolPartEvent("sess-fmt", "asst-msg", "read", "e2", "c2") });
+    await new Promise((resolve) => { setTimeout(resolve, 100); });
+    const resumePrompt = recording.prompts.find((p) => "test-agent" === p.agent);
+    t.truthy(resumePrompt, "resume prompt exists");
+    t.is(resumePrompt.sessionID, "sess-fmt", "resume targets original session");
+    t.is(resumePrompt.agent, "test-agent", "resume uses source agent");
+    t.truthy(resumePrompt.text.includes("Advice"), "resume includes advisor advice");
+    t.truthy(resumePrompt.text.includes("Continue the task using this advice."), "resume includes continuation instruction");
+});
+test.serial("event: abort failure prevents resume", async (t) => {
+    const msgsData = [
+        { info: { role: "user", id: "user-msg", agent: "test-agent" }, parts: [{ type: "text", text: "Task" }] },
+        { info: { role: "assistant", id: "asst-msg", parentID: "user-msg" }, parts: [] },
+    ];
+    const recording = createPromptRecording();
+    const session = createMockSession({
+        messages: (async () => ({ data: msgsData })),
+        abort: (async () => ({ data: false })),
+        prompt: (async (args) => {
+            const body = args.body;
+            recording.prompts.push({
+                sessionID: args.path?.id,
+                agent: body.agent,
+                text: body.parts?.[0]?.text,
+            });
+            return { data: { parts: [{ type: "text", text: "Advice" }] } };
+        }),
+    });
+    const plugin = await AdvisorPlugin(createPluginInput(session), { failureThreshold: 2 });
+    await plugin.config(createMockConfig());
+    await plugin.event({ event: errorToolPartEvent("sess-abfail", "asst-msg", "read", "e1", "c1") });
+    await plugin.event({ event: errorToolPartEvent("sess-abfail", "asst-msg", "read", "e2", "c2") });
+    await new Promise((resolve) => { setTimeout(resolve, 100); });
+    const resumePrompts = recording.prompts.filter((p) => "test-agent" === p.agent).length;
+    t.is(resumePrompts, 0, "no resume when abort fails");
+});
+test.serial("event: advisor failure still resumes with fallback", async (t) => {
+    const msgsData = [
+        { info: { role: "user", id: "user-msg", agent: "test-agent" }, parts: [{ type: "text", text: "Task" }] },
+        { info: { role: "assistant", id: "asst-msg", parentID: "user-msg" }, parts: [] },
+    ];
+    const recording = createPromptRecording();
+    let promptCallCount = 0;
+    const session = createMockSession({
+        messages: (async () => ({ data: msgsData })),
+        abort: (async () => ({ data: true })),
+        status: (async () => ({
+            data: { "sess-advfail": { type: "idle" } },
+        })),
+        create: (async () => ({ data: { id: "temp-fail" } })),
+        prompt: (async (args) => {
+            promptCallCount++;
+            const body = args.body;
+            const sessID = args.path?.id ?? "";
+            recording.prompts.push({
+                sessionID: sessID,
+                agent: body.agent,
+                text: body.parts?.[0]?.text,
+            });
+            if (1 === promptCallCount) {
+                throw new Error("Advisor API error");
+            }
+            return { data: { parts: [{ type: "text", text: "ok" }] } };
+        }),
+    });
+    const plugin = await AdvisorPlugin(createPluginInput(session), { failureThreshold: 2 });
+    await plugin.config(createMockConfig());
+    await plugin.event({ event: errorToolPartEvent("sess-advfail", "asst-msg", "read", "e1", "c1") });
+    await plugin.event({ event: errorToolPartEvent("sess-advfail", "asst-msg", "read", "e2", "c2") });
+    await new Promise((resolve) => { setTimeout(resolve, 100); });
+    const resumePrompts = recording.prompts.filter((p) => "test-agent" === p.agent).length;
+    t.is(resumePrompts, 1, "resume occurs despite advisor failure");
+    const resumeText = recording.prompts.find((p) => "test-agent" === p.agent)?.text;
+    t.truthy(resumeText, "resume text exists");
+    t.falsy((resumeText ?? "").includes("Advisor error"), "must not contain raw Advisor error");
+    t.truthy((resumeText ?? "").includes("reassess") || (resumeText ?? "").includes("Continue"), "must contain fallback guidance");
+});
+test.serial("event: session.deleted prevents resume", async (t) => {
+    const msgsData = [
+        { info: { role: "user", id: "user-msg", agent: "test-agent" }, parts: [{ type: "text", text: "Task" }] },
+        { info: { role: "assistant", id: "asst-msg", parentID: "user-msg" }, parts: [] },
+    ];
+    const recording = createPromptRecording();
+    const session = createMockSession({
+        messages: (async () => ({ data: msgsData })),
+        abort: (async () => ({ data: true })),
+        prompt: (async (args) => {
+            const body = args.body;
+            recording.prompts.push({
+                sessionID: args.path?.id,
+                agent: body.agent,
+                text: body.parts?.[0]?.text,
+            });
+            return { data: { parts: [{ type: "text", text: "Advice" }] } };
+        }),
+    });
+    const plugin = await AdvisorPlugin(createPluginInput(session), { failureThreshold: 2 });
+    await plugin.config(createMockConfig());
+    await plugin.event({ event: errorToolPartEvent("sess-del", "asst-msg", "read", "e1", "c1") });
+    await plugin.event({ event: errorToolPartEvent("sess-del", "asst-msg", "read", "e2", "c2") });
+    await new Promise((resolve) => { setTimeout(resolve, 30); });
+    await plugin.event({ event: sessionDeletedEvent("sess-del") });
+    await plugin.event({ event: sessionIdleEvent("sess-del") });
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+    const resumePrompts = recording.prompts.filter((p) => "test-agent" === p.agent).length;
+    t.is(resumePrompts, 0, "no resume after session deletion");
+});
+test.serial("event: tool events ignored during intervention, completed before resume re-arms", async (t) => {
+    const msgsData = [
+        { info: { role: "user", id: "user-msg", agent: "test-agent" }, parts: [{ type: "text", text: "Task" }] },
+        { info: { role: "assistant", id: "asst-msg", parentID: "user-msg" }, parts: [] },
+    ];
+    const recording = createPromptRecording();
+    let resolveAbort = () => { };
+    const abortDeferred = new Promise((resolve) => {
+        resolveAbort = resolve;
+    });
+    const session = createMockSession({
+        messages: (async () => ({ data: msgsData })),
+        abort: (async () => {
+            await abortDeferred;
+            return { data: true };
+        }),
+        status: (async () => ({
+            data: { "sess-gate": { type: "idle" } },
+        })),
+        prompt: (async (args) => {
+            const body = args.body;
+            recording.prompts.push({
+                sessionID: args.path?.id,
+                agent: body.agent,
+                text: body.parts?.[0]?.text,
+            });
+            return { data: { parts: [{ type: "text", text: "Advice" }] } };
+        }),
+    });
+    const plugin = await AdvisorPlugin(createPluginInput(session), { failureThreshold: 1 });
+    await plugin.config(createMockConfig());
+    await plugin.event({ event: errorToolPartEvent("sess-gate", "asst-msg", "read", "e1", "c1") });
+    await new Promise((resolve) => { setTimeout(resolve, 30); });
+    await plugin.event({ event: errorToolPartEvent("sess-gate", "asst-msg", "read", "e2", "c2") });
+    await plugin.event({ event: errorToolPartEvent("sess-gate", "asst-msg", "read", "e3", "c3") });
+    resolveAbort(undefined);
+    await new Promise((resolve) => { setTimeout(resolve, 100); });
+    await plugin.event({ event: completedToolPartEvent("sess-gate", "asst-msg", "read", "c4") });
+    let abortCallCount = 0;
+    session.abort = (async () => {
+        abortCallCount++;
+        return { data: true };
+    });
+    await plugin.event({ event: errorToolPartEvent("sess-gate", "asst-msg", "read", "e4", "c5") });
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+    t.is(abortCallCount, 1, "completed tool re-arms the feature");
+});
+test.serial("event: abort rejection still clears intervening", async (t) => {
+    const msgsData = [
+        { info: { role: "user", id: "user-msg", agent: "test-agent" }, parts: [{ type: "text", text: "Task" }] },
+        { info: { role: "assistant", id: "asst-msg", parentID: "user-msg" }, parts: [] },
+    ];
+    const session = createMockSession({
+        messages: (async () => ({ data: msgsData })),
+        abort: (async () => {
+            throw new Error("Abort failed");
+        }),
+    });
+    const plugin = await AdvisorPlugin(createPluginInput(session), { failureThreshold: 1 });
+    await plugin.config(createMockConfig());
+    await plugin.event({ event: errorToolPartEvent("sess-abrej", "asst-msg", "read", "err", "c1") });
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+    await plugin.event({ event: completedToolPartEvent("sess-abrej", "asst-msg", "read", "c2") });
+    let abortCallCount = 0;
+    session.abort = (async () => {
+        abortCallCount++;
+        return { data: true };
+    });
+    await plugin.event({ event: errorToolPartEvent("sess-abrej", "asst-msg", "read", "err2", "c3") });
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+    t.is(abortCallCount, 1, "abort rejection recovery allows later intervention");
+});
+test.serial("event: status rejection waits for idle event", async (t) => {
+    const msgsData = [
+        { info: { role: "user", id: "user-msg", agent: "test-agent" }, parts: [{ type: "text", text: "Task" }] },
+        { info: { role: "assistant", id: "asst-msg", parentID: "user-msg" }, parts: [] },
+    ];
+    const recording = createPromptRecording();
+    const session = createMockSession({
+        messages: (async () => ({ data: msgsData })),
+        abort: (async () => ({ data: true })),
+        status: (async () => {
+            throw new Error("Status error");
+        }),
+        prompt: (async (args) => {
+            const body = args.body;
+            recording.prompts.push({
+                sessionID: args.path?.id,
+                agent: body.agent,
+                text: body.parts?.[0]?.text,
+            });
+            return { data: { parts: [{ type: "text", text: "Advice" }] } };
+        }),
+    });
+    const plugin = await AdvisorPlugin(createPluginInput(session), { failureThreshold: 2 });
+    await plugin.config(createMockConfig());
+    await plugin.event({ event: errorToolPartEvent("sess-statfail", "asst-msg", "read", "e1", "c1") });
+    await plugin.event({ event: errorToolPartEvent("sess-statfail", "asst-msg", "read", "e2", "c2") });
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+    await plugin.event({ event: sessionIdleEvent("sess-statfail") });
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+    const resumePrompts = recording.prompts.filter((p) => "test-agent" === p.agent).length;
+    t.is(resumePrompts, 1, "resume occurs after idle event despite status failure");
+});
+test.serial("event: messages failure clears intervention", async (t) => {
+    const session = createMockSession({
+        messages: (async () => {
+            throw new Error("Messages error");
+        }),
+    });
+    const plugin = await AdvisorPlugin(createPluginInput(session), { failureThreshold: 1 });
+    await plugin.config(createMockConfig());
+    await plugin.event({ event: errorToolPartEvent("sess-msgerr", "asst-msg", "read", "err", "c1") });
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+    t.pass("messages failure handled gracefully");
+});
+test.serial("event: completed tool creates state if none exists", async (t) => {
+    const msgsData = [
+        { info: { role: "user", id: "user-msg", agent: "test-agent" }, parts: [{ type: "text", text: "Task" }] },
+        { info: { role: "assistant", id: "asst-msg", parentID: "user-msg" }, parts: [] },
+    ];
+    let abortCallCount = 0;
+    const session = createMockSession({
+        messages: (async () => ({ data: msgsData })),
+        abort: (async () => {
+            abortCallCount++;
+            return { data: true };
+        }),
+    });
+    const plugin = await AdvisorPlugin(createPluginInput(session), { failureThreshold: 2 });
+    await plugin.config(createMockConfig());
+    await plugin.event({ event: completedToolPartEvent("sess-fresh", "asst-msg", "read", "c1") });
+    await plugin.event({ event: errorToolPartEvent("sess-fresh", "asst-msg", "read", "e1", "c2") });
+    await plugin.event({ event: errorToolPartEvent("sess-fresh", "asst-msg", "read", "e2", "c3") });
+    await new Promise((resolve) => { setTimeout(resolve, 100); });
+    t.is(abortCallCount, 1, "completed-initiated state still tracks errors");
+});
+test.serial("event: failures array shift when exceeding threshold", async (t) => {
+    const msgsData = [
+        { info: { role: "user", id: "user-msg", agent: "test-agent" }, parts: [{ type: "text", text: "Task" }] },
+        { info: { role: "assistant", id: "asst-msg", parentID: "user-msg" }, parts: [] },
+    ];
+    const session = createMockSession({
+        messages: (async () => ({ data: msgsData })),
+        abort: (async () => ({ data: true })),
+        status: (async () => ({
+            data: { "sess-shift": { type: "idle" } },
+        })),
+    });
+    const plugin = await AdvisorPlugin(createPluginInput(session), { failureThreshold: 2 });
+    await plugin.config(createMockConfig());
+    await plugin.event({ event: errorToolPartEvent("sess-shift", "asst-msg", "read", "e1", "c1") });
+    await plugin.event({ event: errorToolPartEvent("sess-shift", "asst-msg", "read", "e2", "c2") });
+    await new Promise((resolve) => { setTimeout(resolve, 100); });
+    await plugin.event({ event: errorToolPartEvent("sess-shift", "asst-msg", "read", "e3", "c3") });
+    t.pass("failure shift exercised");
+});
+test.serial("event: session.status idle triggers resume", async (t) => {
+    const msgsData = [
+        { info: { role: "user", id: "user-msg", agent: "test-agent" }, parts: [{ type: "text", text: "Task" }] },
+        { info: { role: "assistant", id: "asst-msg", parentID: "user-msg" }, parts: [] },
+    ];
+    const recording = createPromptRecording();
+    const session = createMockSession({
+        messages: (async () => ({ data: msgsData })),
+        abort: (async () => ({ data: true })),
+        status: (async () => ({ data: {} })),
+        prompt: (async (args) => {
+            const body = args.body;
+            recording.prompts.push({
+                sessionID: args.path?.id,
+                agent: body.agent,
+                text: body.parts?.[0]?.text,
+            });
+            return { data: { parts: [{ type: "text", text: "Advice" }] } };
+        }),
+    });
+    const plugin = await AdvisorPlugin(createPluginInput(session), { failureThreshold: 2 });
+    await plugin.config(createMockConfig());
+    await plugin.event({ event: errorToolPartEvent("sess-statidle", "asst-msg", "read", "e1", "c1") });
+    await plugin.event({ event: errorToolPartEvent("sess-statidle", "asst-msg", "read", "e2", "c2") });
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+    await plugin.event({ event: { type: "session.status", properties: { sessionID: "sess-statidle", status: { type: "idle" } } } });
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+    const resumePrompts = recording.prompts.filter((p) => "test-agent" === p.agent).length;
+    t.is(resumePrompts, 1, "session.status idle triggers resume");
+});
+test.serial("event: session.status busy prevents idle false -> resume on idle", async (t) => {
+    const msgsData = [
+        { info: { role: "user", id: "user-msg", agent: "test-agent" }, parts: [{ type: "text", text: "Task" }] },
+        { info: { role: "assistant", id: "asst-msg", parentID: "user-msg" }, parts: [] },
+    ];
+    const recording = createPromptRecording();
+    const session = createMockSession({
+        messages: (async () => ({ data: msgsData })),
+        abort: (async () => ({ data: true })),
+        status: (async () => ({
+            data: { "sess-busy": { type: "busy" } },
+        })),
+        prompt: (async (args) => {
+            const body = args.body;
+            recording.prompts.push({
+                sessionID: args.path?.id,
+                agent: body.agent,
+                text: body.parts?.[0]?.text,
+            });
+            return { data: { parts: [{ type: "text", text: "Advice" }] } };
+        }),
+    });
+    const plugin = await AdvisorPlugin(createPluginInput(session), { failureThreshold: 2 });
+    await plugin.config(createMockConfig());
+    await plugin.event({ event: errorToolPartEvent("sess-busy", "asst-msg", "read", "e1", "c1") });
+    await plugin.event({ event: errorToolPartEvent("sess-busy", "asst-msg", "read", "e2", "c2") });
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+    await plugin.event({ event: { type: "session.status", properties: { sessionID: "sess-busy", status: { type: "busy" } } } });
+    await plugin.event({ event: sessionIdleEvent("sess-busy") });
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+    const resumePrompts = recording.prompts.filter((p) => "test-agent" === p.agent).length;
+    t.is(resumePrompts, 1, "resume after busy->idle transition");
+});
+test.serial("event: intervention with empty transcript uses fallback input", async (t) => {
+    const msgsData = [
+        { info: { role: "user", id: "user-msg", agent: "test-agent" }, parts: [{ type: "tool-use", text: "tool output" }] },
+        { info: { role: "assistant", id: "asst-msg", parentID: "user-msg" }, parts: [] },
+    ];
+    const recording = createPromptRecording();
+    const session = createMockSession({
+        messages: (async () => ({ data: msgsData })),
+        abort: (async () => ({ data: true })),
+        status: (async () => ({
+            data: { "sess-noctx": { type: "idle" } },
+        })),
+        prompt: (async (args) => {
+            const body = args.body;
+            recording.prompts.push({
+                sessionID: args.path?.id,
+                agent: body.agent,
+                text: body.parts?.[0]?.text,
+            });
+            return { data: { parts: [{ type: "text", text: "Advice" }] } };
+        }),
+    });
+    const plugin = await AdvisorPlugin(createPluginInput(session), { failureThreshold: 1 });
+    await plugin.config(createMockConfig());
+    await plugin.event({ event: errorToolPartEvent("sess-noctx", "asst-msg", "read", "err", "c1") });
+    await new Promise((resolve) => { setTimeout(resolve, 100); });
+    const advisorPrompt = recording.prompts.find((p) => "opencode-advisor:advisor" === p.agent && undefined !== p.text);
+    t.truthy(advisorPrompt, "advisor was prompted");
+    t.truthy(advisorPrompt.text.includes("Tool failures"), "should use fallback format");
+    t.truthy(advisorPrompt.text.includes("err"), "should include error message");
+});
+test.serial("event: session.status retry sets idle false", async (t) => {
+    const msgsData = [
+        { info: { role: "user", id: "user-msg", agent: "test-agent" }, parts: [{ type: "text", text: "Task" }] },
+        { info: { role: "assistant", id: "asst-msg", parentID: "user-msg" }, parts: [] },
+    ];
+    const recording = createPromptRecording();
+    let resolveAbort2 = () => { };
+    const abortDeferred2 = new Promise((resolve) => {
+        resolveAbort2 = resolve;
+    });
+    const session = createMockSession({
+        messages: (async () => ({ data: msgsData })),
+        abort: (async () => {
+            await abortDeferred2;
+            return { data: true };
+        }),
+        status: (async () => ({
+            data: {},
+        })),
+        prompt: (async (args) => {
+            const body = args.body;
+            recording.prompts.push({
+                sessionID: args.path?.id,
+                agent: body.agent,
+                text: body.parts?.[0]?.text,
+            });
+            return { data: { parts: [{ type: "text", text: "Advice" }] } };
+        }),
+    });
+    const plugin = await AdvisorPlugin(createPluginInput(session), { failureThreshold: 2 });
+    await plugin.config(createMockConfig());
+    await plugin.event({ event: errorToolPartEvent("sess-retry", "asst-msg", "read", "e1", "c1") });
+    await plugin.event({ event: errorToolPartEvent("sess-retry", "asst-msg", "read", "e2", "c2") });
+    await new Promise((resolve) => { setTimeout(resolve, 30); });
+    resolveAbort2(undefined);
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+    await plugin.event({ event: { type: "session.status", properties: { sessionID: "sess-retry", status: { type: "retry", attempt: 1, message: "", next: 0 } } } });
+    await new Promise((resolve) => { setTimeout(resolve, 30); });
+    const resumeRetry = recording.prompts.filter((p) => "test-agent" === p.agent).length;
+    t.is(resumeRetry, 0, "no resume after retry status");
+    await plugin.event({ event: sessionIdleEvent("sess-retry") });
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+    const resumePrompts = recording.prompts.filter((p) => "test-agent" === p.agent).length;
+    t.is(resumePrompts, 1, "resume after retry->idle transition");
+});
+test.serial("event: idle before abort resolves does not cause premature resume", async (t) => {
+    const msgsData = [
+        { info: { role: "user", id: "user-msg", agent: "test-agent" }, parts: [{ type: "text", text: "Task" }] },
+        { info: { role: "assistant", id: "asst-msg", parentID: "user-msg" }, parts: [] },
+    ];
+    const recording = createPromptRecording();
+    let resolveAbortReg = () => { };
+    const abortDeferredReg = new Promise((resolve) => {
+        resolveAbortReg = resolve;
+    });
+    const session = createMockSession({
+        messages: (async () => ({ data: msgsData })),
+        abort: (async () => {
+            await abortDeferredReg;
+            return { data: true };
+        }),
+        status: (async () => ({
+            data: { "sess-bfra": { type: "busy" } },
+        })),
+        prompt: (async (args) => {
+            const body = args.body;
+            recording.prompts.push({
+                sessionID: args.path?.id,
+                agent: body.agent,
+                text: body.parts?.[0]?.text,
+            });
+            return { data: { parts: [{ type: "text", text: "Advice" }] } };
+        }),
+    });
+    const plugin = await AdvisorPlugin(createPluginInput(session), { failureThreshold: 1 });
+    await plugin.config(createMockConfig());
+    await plugin.event({ event: errorToolPartEvent("sess-bfra", "asst-msg", "read", "err", "c1") });
+    await new Promise((resolve) => { setTimeout(resolve, 30); });
+    await plugin.event({ event: sessionIdleEvent("sess-bfra") });
+    await new Promise((resolve) => { setTimeout(resolve, 30); });
+    const resumeBeforeAbort = recording.prompts.filter((p) => "test-agent" === p.agent).length;
+    t.is(resumeBeforeAbort, 0, "no resume during pending abort despite idle event");
+    resolveAbortReg(undefined);
+    await new Promise((resolve) => { setTimeout(resolve, 100); });
+    const resumeAfterBusyStatus = recording.prompts.filter((p) => "test-agent" === p.agent).length;
+    t.is(resumeAfterBusyStatus, 0, "no resume when status reports busy after abort");
+    await plugin.event({ event: sessionIdleEvent("sess-bfra") });
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+    const resumeFinal = recording.prompts.filter((p) => "test-agent" === p.agent).length;
+    t.is(resumeFinal, 1, "exactly one resume after post-abort idle");
+});
+test.serial("event: missing temp session uses fallback not Advisor error string", async (t) => {
+    const msgsData = [
+        { info: { role: "user", id: "user-msg", agent: "test-agent" }, parts: [{ type: "text", text: "Task" }] },
+        { info: { role: "assistant", id: "asst-msg", parentID: "user-msg" }, parts: [] },
+    ];
+    const recording = createPromptRecording();
+    const session = createMockSession({
+        messages: (async () => ({ data: msgsData })),
+        abort: (async () => ({ data: true })),
+        status: (async () => ({
+            data: { "sess-notemp": { type: "idle" } },
+        })),
+        create: (async () => ({ data: {} })),
+        prompt: (async (args) => {
+            const body = args.body;
+            recording.prompts.push({
+                sessionID: args.path?.id,
+                agent: body.agent,
+                text: body.parts?.[0]?.text,
+            });
+            return { data: { parts: [{ type: "text", text: "ignored" }] } };
+        }),
+    });
+    const plugin = await AdvisorPlugin(createPluginInput(session), { failureThreshold: 1 });
+    await plugin.config(createMockConfig());
+    await plugin.event({ event: errorToolPartEvent("sess-notemp", "asst-msg", "read", "err", "c1") });
+    await new Promise((resolve) => { setTimeout(resolve, 100); });
+    const resumePrompt = recording.prompts.find((p) => "test-agent" === p.agent);
+    t.truthy(resumePrompt, "resume prompt exists despite missing temp session");
+    t.falsy((resumePrompt.text ?? "").includes("Advisor error"), "must not contain raw Advisor error string");
+    t.truthy((resumePrompt.text ?? "").includes("reassess") || (resumePrompt.text ?? "").includes("Continue"), "must contain fallback guidance");
+});
+test.serial("event: empty advisor response uses fallback not Advisor returned no advice", async (t) => {
+    const msgsData = [
+        { info: { role: "user", id: "user-msg", agent: "test-agent" }, parts: [{ type: "text", text: "Task" }] },
+        { info: { role: "assistant", id: "asst-msg", parentID: "user-msg" }, parts: [] },
+    ];
+    const recording = createPromptRecording();
+    const session = createMockSession({
+        messages: (async () => ({ data: msgsData })),
+        abort: (async () => ({ data: true })),
+        status: (async () => ({
+            data: { "sess-emptxt": { type: "idle" } },
+        })),
+        prompt: (async (args) => {
+            const body = args.body;
+            recording.prompts.push({
+                sessionID: args.path?.id,
+                agent: body.agent,
+                text: body.parts?.[0]?.text,
+            });
+            return { data: { parts: [{ type: "text", text: "" }] } };
+        }),
+    });
+    const plugin = await AdvisorPlugin(createPluginInput(session), { failureThreshold: 1 });
+    await plugin.config(createMockConfig());
+    await plugin.event({ event: errorToolPartEvent("sess-emptxt", "asst-msg", "read", "err", "c1") });
+    await new Promise((resolve) => { setTimeout(resolve, 100); });
+    const resumePrompt = recording.prompts.find((p) => "test-agent" === p.agent);
+    t.truthy(resumePrompt, "resume prompt exists despite empty advisor response");
+    t.falsy((resumePrompt.text ?? "").includes("Advisor returned no advice"), "must not contain raw empty-response string");
+    t.truthy((resumePrompt.text ?? "").includes("reassess") || (resumePrompt.text ?? "").includes("Continue"), "must contain fallback guidance");
+});
+test.serial("event: stale status busy after idle event does not overwrite idle", async (t) => {
+    const msgsData = [
+        { info: { role: "user", id: "user-msg", agent: "test-agent" }, parts: [{ type: "text", text: "Task" }] },
+        { info: { role: "assistant", id: "asst-msg", parentID: "user-msg" }, parts: [] },
+    ];
+    const recording = createPromptRecording();
+    let resolveStatusStale = () => { };
+    const statusDeferred = new Promise((resolve) => {
+        resolveStatusStale = resolve;
+    });
+    const session = createMockSession({
+        messages: (async () => ({ data: msgsData })),
+        abort: (async () => ({ data: true })),
+        status: (async () => {
+            await statusDeferred;
+            return { data: { "sess-stale": { type: "busy" } } };
+        }),
+        prompt: (async (args) => {
+            const body = args.body;
+            recording.prompts.push({
+                sessionID: args.path?.id,
+                agent: body.agent,
+                text: body.parts?.[0]?.text,
+            });
+            return { data: { parts: [{ type: "text", text: "Advice" }] } };
+        }),
+    });
+    const plugin = await AdvisorPlugin(createPluginInput(session), { failureThreshold: 1 });
+    await plugin.config(createMockConfig());
+    await plugin.event({ event: errorToolPartEvent("sess-stale", "asst-msg", "read", "err", "c1") });
+    await new Promise((resolve) => { setTimeout(resolve, 30); });
+    await plugin.event({ event: sessionIdleEvent("sess-stale") });
+    await new Promise((resolve) => { setTimeout(resolve, 30); });
+    resolveStatusStale(undefined);
+    await new Promise((resolve) => { setTimeout(resolve, 100); });
+    const resumePrompts = recording.prompts.filter((p) => "test-agent" === p.agent).length;
+    t.is(resumePrompts, 1, "resume fires despite stale busy status response");
+});
+test.serial("event: post-abort idle followed by busy status event before advice blocks resume", async (t) => {
+    const msgsData = [
+        { info: { role: "user", id: "user-msg", agent: "test-agent" }, parts: [{ type: "text", text: "Task" }] },
+        { info: { role: "assistant", id: "asst-msg", parentID: "user-msg" }, parts: [] },
+    ];
+    const recording = createPromptRecording();
+    let resolvePromptDelay = () => { };
+    const promptDeferred = new Promise((resolve) => {
+        resolvePromptDelay = resolve;
+    });
+    let promptCallCountEvent = 0;
+    const session = createMockSession({
+        messages: (async () => ({ data: msgsData })),
+        abort: (async () => ({ data: true })),
+        status: (async () => ({
+            data: { "sess-busy2": { type: "idle" } },
+        })),
+        prompt: (async (args) => {
+            promptCallCountEvent++;
+            const body = args.body;
+            const sessID = args.path?.id ?? "";
+            recording.prompts.push({
+                sessionID: sessID,
+                agent: body.agent,
+                text: body.parts?.[0]?.text,
+            });
+            if (1 === promptCallCountEvent) {
+                await promptDeferred;
+            }
+            return { data: { parts: [{ type: "text", text: "Advice2" }] } };
+        }),
+    });
+    const plugin = await AdvisorPlugin(createPluginInput(session), { failureThreshold: 1 });
+    await plugin.config(createMockConfig());
+    await plugin.event({ event: errorToolPartEvent("sess-busy2", "asst-msg", "read", "err", "c1") });
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+    await plugin.event({ event: { type: "session.status", properties: { sessionID: "sess-busy2", status: { type: "busy" } } } });
+    await new Promise((resolve) => { setTimeout(resolve, 30); });
+    const resumeAfterBusy = recording.prompts.filter((p) => "test-agent" === p.agent).length;
+    t.is(resumeAfterBusy, 0, "no resume after post-abort idle then busy event");
+    resolvePromptDelay(undefined);
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+    const resumeAfterAdvice = recording.prompts.filter((p) => "test-agent" === p.agent).length;
+    t.is(resumeAfterAdvice, 0, "no resume after advisor completes while idle=false");
+    await plugin.event({ event: sessionIdleEvent("sess-busy2") });
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+    const resumeFinalEvent = recording.prompts.filter((p) => "test-agent" === p.agent).length;
+    t.is(resumeFinalEvent, 1, "exactly one resume after subsequent idle event");
+});
+test.serial("event: pre-abort idle ignored, post-abort status busy blocks until later idle", async (t) => {
+    const msgsData = [
+        { info: { role: "user", id: "user-msg", agent: "test-agent" }, parts: [{ type: "text", text: "Task" }] },
+        { info: { role: "assistant", id: "asst-msg", parentID: "user-msg" }, parts: [] },
+    ];
+    const recording = createPromptRecording();
+    let resolveAbortPre = () => { };
+    const abortDeferredPre = new Promise((resolve) => {
+        resolveAbortPre = resolve;
+    });
+    const session = createMockSession({
+        messages: (async () => ({ data: msgsData })),
+        abort: (async () => {
+            await abortDeferredPre;
+            return { data: true };
+        }),
+        status: (async () => ({
+            data: { "sess-bfra2": { type: "busy" } },
+        })),
+        prompt: (async (args) => {
+            const body = args.body;
+            recording.prompts.push({
+                sessionID: args.path?.id,
+                agent: body.agent,
+                text: body.parts?.[0]?.text,
+            });
+            return { data: { parts: [{ type: "text", text: "Advice3" }] } };
+        }),
+    });
+    const plugin = await AdvisorPlugin(createPluginInput(session), { failureThreshold: 1 });
+    await plugin.config(createMockConfig());
+    await plugin.event({ event: errorToolPartEvent("sess-bfra2", "asst-msg", "read", "err", "c1") });
+    await new Promise((resolve) => { setTimeout(resolve, 30); });
+    await plugin.event({ event: sessionIdleEvent("sess-bfra2") });
+    await new Promise((resolve) => { setTimeout(resolve, 30); });
+    resolveAbortPre(undefined);
+    await new Promise((resolve) => { setTimeout(resolve, 100); });
+    const resumeAfterBusyPre = recording.prompts.filter((p) => "test-agent" === p.agent).length;
+    t.is(resumeAfterBusyPre, 0, "no resume with pre-abort idle and post-abort busy status");
+    await plugin.event({ event: sessionIdleEvent("sess-bfra2") });
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+    const resumeFinalPre = recording.prompts.filter((p) => "test-agent" === p.agent).length;
+    t.is(resumeFinalPre, 1, "exactly one resume after post-abort idle");
+});

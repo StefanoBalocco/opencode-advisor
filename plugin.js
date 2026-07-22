@@ -1,35 +1,23 @@
 import { tool } from "@opencode-ai/plugin";
 const defaultModel = "deepseek/deepseek-v4-pro";
+const defaultFailureThreshold = 3;
 const advisorAgent = "opencode-advisor:advisor";
-const advisorDefaultPrompt = `You are a strategic advisor for a coding agent. Read the conversation transcript and provide a concise plan or course correction.
+const advisorDefaultPrompt = `Act as a strategic advisor to a coding agent. Read the conversation transcript, identify the current objective, and provide a concise plan or course correction.
 
-Your advice must be actionable — tell the executor:
-- What to do next
-- What order to proceed in
-- What to watch out for
-- What not to do
+Give the executor clear, ordered instructions. State what to do next, the sequence to follow, the main risks, and the actions to avoid. Prefer the simplest solution that satisfies the specification. Flag choices that add unnecessary code, indirection, or maintenance burden. When the executor is stuck, repeating failed attempts, or following a disproved assumption, redirect the approach. State plainly when tests, logs, or other evidence contradict the current reasoning.
 
-Key heuristics:
-- Prefer the simplest approach that meets the spec
-- Flag approaches that create maintenance burden
-- If the executor is stuck or looping, suggest a different approach
-- If tests or evidence contradict an assumption, say so explicitly
+Use read-only tools only when they add necessary context. You may inspect the workspace with "read", "glob", and "grep", consult public sources with "webfetch" and "websearch", and load relevant skills. Do not edit files, change system state, or run commands other than read-only shell commands.
 
-You may use read-only tools (read, glob, grep, webfetch, websearch, skill) to inspect the workspace or public web for better context. You may NOT edit files or run arbitrary commands beyond read-only shell commands.
+Respond in fewer than 300 words. Use numbered steps. Do not write code; provide advice only.`;
+const advisorToolDescription = `Consult a strategic advisor that reads the full conversation and returns a concise plan or course correction.
 
-Respond in under 300 words. Use enumerated steps. Do NOT write code or edit files — only advise.`;
-const advisorToolDescription = `Consult a strategic advisor backed by a configurable reviewer model. It reads your full conversation context and provides a concise plan or course correction.
+Call "advisor" before substantive work: writing code, editing files, choosing an interpretation, or relying on an unverified assumption. Complete only the orientation needed to inform the review—locate files, read code, or fetch documentation—then call the advisor. Orientation is not substantive work.
 
-Call advisor BEFORE substantive work — before writing code, editing files, committing to an interpretation, or building on an assumption. If the task requires orientation first (finding files, reading code, fetching docs), do that, then call advisor. Orientation is NOT substantive work.
+Call it again when the approach stalls, errors recur, results contradict expectations, or a different direction appears necessary. Request a final review before declaring the task complete. First preserve the deliverable in its proper durable form by saving files or results and committing only when the task requires a commit.
 
-Also call advisor:
-- When stuck — errors recurring, approach not converging, results that don't fit
-- When considering a change of approach
-- When you believe the task is complete. BEFORE this call, make your deliverable durable: write the file, save the result, commit the change
+For tasks longer than a few steps, consult the advisor before choosing an approach and again before completion. Skip it only on short, reactive turns where tool output directly determines the next action.
 
-On tasks longer than a few steps, call advisor at least once before committing to an approach and once before declaring done. On short reactive turns where tool output directly dictates the next action, skip advisor.
-
-Give the advice serious weight. Only override if you have primary-source evidence that contradicts a specific claim. Surface conflicts in another advisor call rather than silently switching approaches.`;
+Give the advice serious weight. Override a specific recommendation only when primary-source evidence disproves it. Present the conflict in another advisor call instead of changing course silently.`;
 const fixedPermission = {
     "*": "deny",
     "read": "allow",
@@ -67,6 +55,7 @@ const profileKeys = new Set([
     "temperature",
     "top_p",
     "options",
+    "failureThreshold",
 ]);
 function assertString(v, label, allowEmpty = false) {
     if ("string" === typeof v) {
@@ -169,6 +158,13 @@ function parseProfile(value, section) {
             assertValidOptions(obj.options, `${section}.options`);
             profile.options = structuredClone(obj.options);
         }
+        if (undefined !== obj.failureThreshold) {
+            assertFiniteNumber(obj.failureThreshold, `${section}.failureThreshold`);
+            if (!Number.isInteger(obj.failureThreshold) || (1 > obj.failureThreshold)) {
+                throw new Error(`${section}.failureThreshold: must be a positive integer`);
+            }
+            profile.failureThreshold = obj.failureThreshold;
+        }
         returnValue = profile;
     }
     else if (undefined === value) {
@@ -244,14 +240,258 @@ function formatTranscript(messages, excludeID) {
 function textPart(t) {
     return { type: "text", text: t };
 }
+function createSessionState() {
+    return {
+        count: 0,
+        failures: [],
+        triggered: false,
+        intervening: false,
+        awaitingIdle: false,
+        idle: false,
+        idleGeneration: 0,
+        deleted: false,
+        sourceAgent: "",
+        advice: "",
+    };
+}
 export const AdvisorPlugin = async ({ client }, rawOptions) => {
     const advisorProfile = parseProfile(rawOptions, "plugin options");
+    const failureThreshold = advisorProfile.failureThreshold ?? defaultFailureThreshold;
+    const advisorSessions = new Set();
+    const sessionStates = new Map();
+    let resolvedCfg;
+    async function _callAdvisor(transcript) {
+        let returnValue;
+        const createRes = await client.session.create({
+            body: { title: "advisor-subcall" },
+        });
+        const tempID = createRes.data?.id;
+        if (!tempID) {
+            returnValue = "Advisor error: failed to create ephemeral session.";
+        }
+        else {
+            advisorSessions.add(tempID);
+            try {
+                const response = await client.session.prompt({
+                    path: { id: tempID },
+                    body: {
+                        agent: advisorAgent,
+                        parts: [textPart(transcript)],
+                    },
+                });
+                const text = response.data?.parts
+                    ?.filter((p) => "text" === p.type)
+                    .map((p) => p.text)
+                    .join("\n");
+                returnValue = text || "Advisor returned no advice.";
+            }
+            finally {
+                advisorSessions.delete(tempID);
+                await client.session
+                    .delete({ path: { id: tempID } })
+                    .catch(() => { });
+            }
+        }
+        return returnValue;
+    }
+    function _maybeResume(sessionID, state) {
+        if (!state.deleted && state.intervening && state.idle && state.sourceAgent && state.advice) {
+            state.intervening = false;
+            state.awaitingIdle = false;
+            client.session.prompt({
+                path: { id: sessionID },
+                body: {
+                    agent: state.sourceAgent,
+                    parts: [textPart(state.advice + "\n\nContinue the task using this advice.")],
+                },
+            }).catch(() => { });
+        }
+    }
+    async function _launchIntervention(sessionID, messageID, state) {
+        let msgs;
+        let fetchOk = true;
+        try {
+            const msgsRes = await client.session.messages({
+                path: { id: sessionID },
+            });
+            msgs = msgsRes.data;
+        }
+        catch {
+            fetchOk = false;
+        }
+        if (fetchOk && msgs) {
+            let assistantMsgInfo;
+            let userMsgInfo;
+            let parentID;
+            for (const msg of msgs) {
+                if ("assistant" === msg.info.role && msg.info.id === messageID) {
+                    assistantMsgInfo = msg;
+                    break;
+                }
+            }
+            if (assistantMsgInfo) {
+                parentID = assistantMsgInfo.info.parentID;
+            }
+            if (parentID) {
+                for (const msg of msgs) {
+                    if ("user" === msg.info.role && msg.info.id === parentID) {
+                        userMsgInfo = msg;
+                        break;
+                    }
+                }
+            }
+            const sourceAgent = userMsgInfo?.info?.agent ?? "";
+            if (sourceAgent) {
+                let agentEligible = true;
+                if (resolvedCfg?.agent?.[sourceAgent]?.tools?.advisor === false) {
+                    agentEligible = false;
+                }
+                if (agentEligible) {
+                    state.sourceAgent = sourceAgent;
+                    let abortOk = false;
+                    try {
+                        const abortRes = await client.session.abort({
+                            path: { id: sessionID },
+                        });
+                        abortOk = true === abortRes.data;
+                    }
+                    catch {
+                        abortOk = false;
+                    }
+                    if (abortOk) {
+                        state.awaitingIdle = true;
+                        state.idle = false;
+                        const capturedGeneration = state.idleGeneration;
+                        try {
+                            const statusRes = await client.session.status();
+                            if (capturedGeneration === state.idleGeneration) {
+                                const sessStatus = statusRes.data?.[sessionID];
+                                if (sessStatus) {
+                                    state.idle = ("idle" === sessStatus.type);
+                                }
+                                else {
+                                    state.idle = false;
+                                }
+                            }
+                        }
+                        catch {
+                        }
+                        const transcript = formatTranscript(msgs, "");
+                        const failureBlock = state.failures
+                            .map((f) => `Tool: ${f.tool}\nError: ${f.error}`)
+                            .join("\n\n");
+                        const advisorInput = transcript
+                            ? `${transcript}\n\n--- Recent tool failures ---\n${failureBlock}`
+                            : `--- Tool failures ---\n${failureBlock}\n\nContinue the task reassessing the approach.`;
+                        let advice;
+                        try {
+                            const rawAdvice = await _callAdvisor(advisorInput);
+                            if ("Advisor returned no advice." === rawAdvice || "Advisor error: failed to create ephemeral session." === rawAdvice) {
+                                advice = "Reassess the failed approach and continue working.";
+                            }
+                            else {
+                                advice = rawAdvice;
+                            }
+                        }
+                        catch {
+                            advice = "Reassess the failed approach and continue working.";
+                        }
+                        state.advice = advice;
+                        _maybeResume(sessionID, state);
+                    }
+                    else {
+                        state.intervening = false;
+                    }
+                }
+                else {
+                    state.intervening = false;
+                }
+            }
+            else {
+                state.intervening = false;
+            }
+        }
+        else {
+            state.intervening = false;
+        }
+    }
     return {
         config: async (cfg) => {
+            resolvedCfg = cfg;
             const advisorCfg = buildAgentConfig(advisorProfile, advisorDefaultPrompt, cfg);
             const agents = cfg.agent ?? {};
             agents[advisorAgent] = advisorCfg;
             cfg.agent = agents;
+        },
+        event: async ({ event }) => {
+            if ("message.part.updated" === event.type) {
+                const part = event.properties.part;
+                if ("tool" === part.type && !advisorSessions.has(part.sessionID)) {
+                    const sessionID = part.sessionID;
+                    let state = sessionStates.get(sessionID);
+                    if (state && state.intervening) {
+                    }
+                    else if ("error" === part.state.status) {
+                        if ("advisor" !== part.tool) {
+                            if (!state) {
+                                state = createSessionState();
+                                sessionStates.set(sessionID, state);
+                            }
+                            if (state.failures.length >= failureThreshold) {
+                                state.failures.shift();
+                            }
+                            state.failures.push({ tool: part.tool, error: part.state.error });
+                            state.count = state.failures.length;
+                            if (state.count >= failureThreshold && !state.triggered) {
+                                state.triggered = true;
+                                state.intervening = true;
+                                void _launchIntervention(sessionID, part.messageID, state);
+                            }
+                        }
+                    }
+                    else if ("completed" === part.state.status) {
+                        if (!state) {
+                            state = createSessionState();
+                            sessionStates.set(sessionID, state);
+                        }
+                        state.count = 0;
+                        state.failures = [];
+                        state.triggered = false;
+                    }
+                }
+            }
+            else if ("session.idle" === event.type) {
+                const sessID = event.properties.sessionID;
+                const state = sessionStates.get(sessID);
+                if (state && state.awaitingIdle) {
+                    state.idleGeneration++;
+                    state.idle = true;
+                    _maybeResume(sessID, state);
+                }
+            }
+            else if ("session.status" === event.type) {
+                const sessID = event.properties.sessionID;
+                const state = sessionStates.get(sessID);
+                if (state && state.awaitingIdle) {
+                    if ("idle" === event.properties.status.type) {
+                        state.idleGeneration++;
+                        state.idle = true;
+                        _maybeResume(sessID, state);
+                    }
+                    else if ("busy" === event.properties.status.type || "retry" === event.properties.status.type) {
+                        state.idleGeneration++;
+                        state.idle = false;
+                    }
+                }
+            }
+            else if ("session.deleted" === event.type) {
+                const sessID = event.properties.info.id;
+                const state = sessionStates.get(sessID);
+                if (state) {
+                    state.deleted = true;
+                }
+                sessionStates.delete(sessID);
+            }
         },
         tool: {
             advisor: tool({
@@ -275,34 +515,7 @@ export const AdvisorPlugin = async ({ client }, rawOptions) => {
                                 returnValue = "Advisor declined: no prior conversation to analyze.";
                             }
                             else {
-                                const createRes = await client.session.create({
-                                    body: { title: "advisor-subcall" },
-                                });
-                                const tempID = createRes.data?.id;
-                                if (!tempID) {
-                                    returnValue = "Advisor error: failed to create ephemeral session.";
-                                }
-                                else {
-                                    try {
-                                        const response = await client.session.prompt({
-                                            path: { id: tempID },
-                                            body: {
-                                                agent: advisorAgent,
-                                                parts: [textPart(transcript)],
-                                            },
-                                        });
-                                        const text = response.data?.parts
-                                            ?.filter((p) => "text" === p.type)
-                                            .map((p) => p.text)
-                                            .join("\n");
-                                        returnValue = text || "Advisor returned no advice.";
-                                    }
-                                    finally {
-                                        await client.session
-                                            .delete({ path: { id: tempID } })
-                                            .catch(() => { });
-                                    }
-                                }
+                                returnValue = await _callAdvisor(transcript);
                             }
                         }
                         catch (err) {
@@ -319,4 +532,3 @@ export const AdvisorPlugin = async ({ client }, rawOptions) => {
     };
 };
 export default AdvisorPlugin;
-//# sourceMappingURL=plugin.js.map

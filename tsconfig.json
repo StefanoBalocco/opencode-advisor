@@ -4,7 +4,7 @@
     "module": "esnext",
     "moduleResolution": "bundler",
     "declaration": false,
-    "removeComments": false,
+    "removeComments": true,
     "sourceMap": true,
     "strict": true,
     "noImplicitAny": true,
@@ -16,7 +16,6 @@
     "noUnusedParameters": true,
     "noImplicitReturns": true,
     "allowSyntheticDefaultImports": true,
-    "skipLibCheck": true,
     "types": ["node"]
   },
   "files": [

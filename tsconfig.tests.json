@@ -5,7 +5,7 @@
     "moduleResolution": "bundler",
     "declaration": false,
     "removeComments": true,
-    "sourceMap": true,
+    "sourceMap": false,
     "strict": true,
     "noImplicitAny": true,
     "strictNullChecks": true,
@@ -16,7 +16,6 @@
     "noUnusedParameters": true,
     "noImplicitReturns": true,
     "allowSyntheticDefaultImports": true,
-    "skipLibCheck": true,
     "types": ["node"]
   },
   "files": [

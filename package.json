@@ -1,6 +1,6 @@
 {
   "name": "@stefanobalocco/opencode-advisor",
-  "version": "2.2.1",
+  "version": "2.3.0",
   "description": "OpenCode plugin — advisor() tool via a hidden internal agent",
   "type": "module",
   "main": "plugin.js",
@@ -37,6 +37,6 @@
     "ava": "~6",
     "c8": "~12",
     "@opencode-ai/sdk": ">=1.4.9",
-    "@types/node": "^24.13.3"
+    "@types/node": "~24"
   }
 }
