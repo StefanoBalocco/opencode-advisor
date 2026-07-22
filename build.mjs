@@ -1,4 +1,3 @@
-import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
@@ -80,78 +79,6 @@ function validateBuildTargets( targets ) {
 			}
 		}
 	}
-}
-
-// ── Per-file literal aliasing ─────────────────────────────────────────────────
-
-function isUnsafeStringLiteral( node, parent ) {
-	let unsafe = false;
-	if( parent ) {
-		if( ts.isExpressionStatement( parent ) && parent.expression === node ) {
-			unsafe = true;
-		}
-		if( ( ts.isImportDeclaration( parent ) || ts.isExportDeclaration( parent ) ) && parent.moduleSpecifier === node ) {
-			unsafe = true;
-		}
-		if( ts.isCallExpression( parent ) && ts.isImportKeyword( parent.expression ) && 0 < parent.arguments.length && parent.arguments[ 0 ] === node ) {
-			unsafe = true;
-		}
-		if( ( ts.isImportAttribute( parent ) ) && ( parent.value === node || parent.name === node ) ) {
-			unsafe = true;
-		}
-		if( ( ts.isPropertyAssignment( parent ) || ts.isMethodDeclaration( parent ) || ts.isPropertyDeclaration( parent ) || ts.isGetAccessorDeclaration( parent ) || ts.isSetAccessorDeclaration( parent ) || ts.isPropertyAccessExpression( parent ) || ts.isElementAccessExpression( parent ) ) && parent.name === node ) {
-			unsafe = true;
-		}
-		if( ts.isBindingElement( parent ) && parent.propertyName === node ) {
-			unsafe = true;
-		}
-		if( ( ts.isImportSpecifier( parent ) || ts.isExportSpecifier( parent ) ) && ( parent.name === node || parent.propertyName === node ) ) {
-			unsafe = true;
-		}
-	}
-	return unsafe;
-}
-
-function collectStringCandidates( sourceFile ) {
-	const identifiers = new Set();
-	const stringLiterals = new Map();
-
-	function visit( node, parent ) {
-		if( ts.isIdentifier( node ) ) {
-			identifiers.add( node.text );
-		}
-		if( ts.isStringLiteral( node ) ) {
-			const text = node.text;
-			if( !isUnsafeStringLiteral( node, parent ) ) {
-				if( !stringLiterals.has( text ) ) {
-					stringLiterals.set( text, [] );
-				}
-				stringLiterals.get( text ).push( { node, parent } );
-			}
-		}
-		ts.forEachChild( node, child => visit( child, node ) );
-	}
-
-	visit( sourceFile, null );
-
-	return { identifiers, stringLiterals };
-}
-
-function findInsertionPoint( sourceFile ) {
-	let returnValue = 0;
-	let go = true;
-	const cL1 = sourceFile.statements.length;
-	for( let iL1 = 0; iL1 < cL1 && go; iL1++ ) {
-		const stmt = sourceFile.statements[ iL1 ];
-		if( ts.isExpressionStatement( stmt ) && ts.isStringLiteral( stmt.expression ) ) {
-			returnValue = stmt.end;
-		} else if( ts.isImportDeclaration( stmt ) ) {
-			returnValue = stmt.end;
-		} else {
-			go = false;
-		}
-	}
-	return returnValue;
 }
 
 // ── Target runner ─────────────────────────────────────────────────────────────
