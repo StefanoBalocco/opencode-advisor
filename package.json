@@ -1,21 +1,26 @@
 {
   "name": "@stefanobalocco/opencode-advisor",
-  "version": "2.3.0",
+  "version": "2.3.1",
   "description": "OpenCode plugin — advisor() tool via a hidden internal agent",
   "type": "module",
-  "main": "plugin.js",
+  "main": "dist/plugin.js",
+  "types": "dist/plugin.d.ts",
   "exports": {
-    ".": "./plugin.js"
+    ".": {
+      "types": "./dist/plugin.d.ts",
+      "import": "./dist/plugin.js"
+    }
   },
+  "files": [
+    "dist/plugin.js",
+    "dist/plugin.d.ts"
+  ],
   "scripts": {
     "build": "node build.mjs all",
     "build:plugin": "node build.mjs plugin",
     "build:tests": "node build.mjs tests",
-    "tests": "c8 --include=plugin.ts --exclude-after-remap --per-file --100 --reporter=text --reporter=lcov ava '*.test.js' --verbose"
+    "tests": "c8 --include=src/plugin.ts --exclude-after-remap --per-file --100 --reporter=text --reporter=lcov ava 'tests/dist/*.test.js' --verbose"
   },
-  "files": [
-    "plugin.js"
-  ],
   "keywords": [
     "opencode",
     "plugin",

@@ -532,3 +532,4 @@ export const AdvisorPlugin = async ({ client }, rawOptions) => {
     };
 };
 export default AdvisorPlugin;
+//# sourceMappingURL=plugin.js.map

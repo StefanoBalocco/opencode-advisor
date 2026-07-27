@@ -147,7 +147,7 @@ npm run build
 npm run tests
 ```
 
-The build compiles `plugin.ts` and `plugin.test.ts` to JavaScript. The published package entry is `plugin.js`.
+The build compiles `src/plugin.ts` and `tests/src/plugin.test.ts` to JavaScript. The published package entry is `dist/plugin.js`.
 
 ## License
 

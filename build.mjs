@@ -11,7 +11,7 @@ const isMain = process.argv[ 1 ] && path.resolve( process.argv[ 1 ] ) === __file
 
 const buildTargets = [
 	[ 'plugin', 'tsconfig.json', [] ],
-	[ 'tests', 'tsconfig.tests.json', [] ]
+	[ 'tests', 'tsconfig.tests.json', [], 'tests' ]
 ];
 
 // ── Utilities ─────────────────────────────────────────────────────────────────

@@ -1,11 +1,12 @@
 {
   "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist",
     "target": "esnext",
     "module": "esnext",
     "moduleResolution": "bundler",
     "declaration": false,
     "removeComments": true,
-    "sourceMap": false,
     "strict": true,
     "noImplicitAny": true,
     "strictNullChecks": true,
@@ -16,9 +17,10 @@
     "noUnusedParameters": true,
     "noImplicitReturns": true,
     "allowSyntheticDefaultImports": true,
+    "sourceMap": false,
     "types": ["node"]
   },
   "files": [
-    "plugin.test.ts"
+    "src/plugin.test.ts"
   ]
 }

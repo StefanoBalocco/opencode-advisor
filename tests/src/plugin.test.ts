@@ -2,8 +2,8 @@ import test from "ava";
 import type { Config as PluginConfig, Hooks, PluginInput, PluginOptions } from "@opencode-ai/plugin";
 import type { ToolContext, ToolResult } from "@opencode-ai/plugin/tool";
 import type { Event, OpencodeClient } from "@opencode-ai/sdk";
-import { AdvisorPlugin } from "./plugin.js";
-import type { Undefinedable } from "./plugin.js";
+import { AdvisorPlugin } from "../../dist/plugin.js";
+import type { Undefinedable } from "../../dist/plugin.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 

@@ -1,5 +1,5 @@
 import test from "ava";
-import { AdvisorPlugin } from "./plugin.js";
+import { AdvisorPlugin } from "../../dist/plugin.js";
 function createPromptRecording() {
     return {
         promptSessionID: undefined,
